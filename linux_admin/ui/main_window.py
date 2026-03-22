@@ -6,6 +6,7 @@ from linux_admin.ui.tabs.services import ServicesTab
 from linux_admin.ui.tabs.firewall import FirewallTab
 from linux_admin.ui.tabs.docker import DockerTab
 from linux_admin.ui.tabs.gpu import GPUTab
+from linux_admin.ui.tabs.backups import BackupsTab  # NEW IMPORT
 
 class MainWindow(QMainWindow):
     def __init__(self, sec_mgr, db_mgr):
@@ -14,7 +15,7 @@ class MainWindow(QMainWindow):
         self.db_mgr = db_mgr
         
         self.setWindowTitle("Linux System Administrator - Pro Dashboard")
-        self.resize(1200, 800)
+        self.resize(1300, 850)
         
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -27,6 +28,7 @@ class MainWindow(QMainWindow):
         self.firewall_tab = FirewallTab(sec_mgr, db_mgr)
         self.docker_tab = DockerTab(sec_mgr, db_mgr)
         self.gpu_tab = GPUTab(sec_mgr, db_mgr)
+        self.backups_tab = BackupsTab(sec_mgr, db_mgr) # NEW TAB
         
         self.tabs.addTab(self.devices_tab, "Devices & Groups")
         self.tabs.addTab(self.metrics_tab, "Realtime Metrics")
@@ -35,6 +37,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.firewall_tab, "Firewall")
         self.tabs.addTab(self.docker_tab, "Docker")
         self.tabs.addTab(self.gpu_tab, "NVIDIA GPU")
+        self.tabs.addTab(self.backups_tab, "Backups & Restore") # ADDED TO UI
 
         # Connect signals so UI updates when devices change
         self.devices_tab.devices_changed.connect(self.metrics_tab.refresh_devices)
@@ -43,3 +46,4 @@ class MainWindow(QMainWindow):
         self.devices_tab.devices_changed.connect(self.firewall_tab.refresh_devices)
         self.devices_tab.devices_changed.connect(self.docker_tab.refresh_devices)
         self.devices_tab.devices_changed.connect(self.gpu_tab.refresh_devices)
+        self.devices_tab.devices_changed.connect(self.backups_tab.refresh_devices)
