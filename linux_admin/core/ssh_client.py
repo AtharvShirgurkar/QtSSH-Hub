@@ -7,7 +7,7 @@ class SSHClientManager:
         self.port = port
         self.username = username
         self.auth_type = auth_type
-        self.credential = credential # Decrypted credential
+        self.credential = credential
         self.client = None
 
     def connect(self):
@@ -18,7 +18,6 @@ class SSHClientManager:
             if self.auth_type == 'password':
                 self.client.connect(self.ip, port=self.port, username=self.username, password=self.credential, timeout=10)
             elif self.auth_type == 'key':
-                # Treat credential as the private key string
                 key_file = io.StringIO(self.credential)
                 try:
                     pkey = paramiko.RSAKey.from_private_key(key_file)
@@ -33,9 +32,18 @@ class SSHClientManager:
             self.connect()
             
         if sudo_password:
-            command = f"echo {sudo_password} | sudo -S -p '' {command}"
+            # Removed the `echo {password} |` part entirely.
+            # We just tell sudo to read from standard input (-S)
+            command = f"sudo -S -p '' {command}"
             
         stdin, stdout, stderr = self.client.exec_command(command)
+        
+        if sudo_password:
+            # Write the password directly to the hidden input stream
+            # This completely bypasses fish/bash/zsh wildcard parsing!
+            stdin.write(sudo_password + "\n")
+            stdin.flush()
+            
         out = stdout.read().decode().strip()
         err = stderr.read().decode().strip()
         exit_status = stdout.channel.recv_exit_status()
