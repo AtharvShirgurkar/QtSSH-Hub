@@ -1,5 +1,6 @@
 import paramiko
 import io
+import socket
 
 class SSHClientManager:
     def __init__(self, ip, port, username, auth_type, credential):
@@ -18,36 +19,59 @@ class SSHClientManager:
             if self.auth_type == 'password':
                 self.client.connect(self.ip, port=self.port, username=self.username, password=self.credential, timeout=10)
             elif self.auth_type == 'key':
-                key_file = io.StringIO(self.credential)
-                try:
-                    pkey = paramiko.RSAKey.from_private_key(key_file)
-                except paramiko.ssh_exception.PasswordRequiredException:
-                    raise Exception("Encrypted private keys not supported yet in this snippet.")
+                # Sanitize the key format to guarantee proper newlines
+                clean_key = self.credential.replace('\r\n', '\n').strip() + '\n'
+                key_file = io.StringIO(clean_key)
+                pkey = None
+                
+                # Removed DSSKey. Trying RSA, Ed25519, and ECDSA.
+                for key_class in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey):
+                    try:
+                        key_file.seek(0)
+                        pkey = key_class.from_private_key(key_file)
+                        break
+                    except Exception:
+                        pass
+                
+                if not pkey:
+                    raise Exception("Invalid or unsupported private key format. Ensure it is an unencrypted RSA, Ed25519, or ECDSA key.")
+                    
                 self.client.connect(self.ip, port=self.port, username=self.username, pkey=pkey, timeout=10)
         except Exception as e:
             raise Exception(f"Failed to connect to {self.ip}: {str(e)}")
 
-    def execute(self, command, sudo_password=None):
+    def execute(self, command, use_sudo=False, sudo_password=None):
         if not self.client:
             self.connect()
             
-        if sudo_password:
-            # Removed the `echo {password} |` part entirely.
-            # We just tell sudo to read from standard input (-S)
-            command = f"sudo -S -p '' {command}"
+        if use_sudo:
+            if sudo_password:
+                # Use password-based sudo
+                command = f"sudo -S -p '' {command}"
+            else:
+                # Use passwordless sudo (-n prevents it from hanging if it prompts)
+                command = f"sudo -n {command}"
             
         stdin, stdout, stderr = self.client.exec_command(command)
         
-        if sudo_password:
+        if use_sudo and sudo_password:
             # Write the password directly to the hidden input stream
-            # This completely bypasses fish/bash/zsh wildcard parsing!
             stdin.write(sudo_password + "\n")
             stdin.flush()
             
-        out = stdout.read().decode().strip()
-        err = stderr.read().decode().strip()
-        exit_status = stdout.channel.recv_exit_status()
+        # Forcibly close stdin to prevent background commands from hanging
+        stdin.close()
         
+        # Set a hard timeout on the channel to prevent infinite loops
+        stdout.channel.settimeout(30.0)
+        
+        try:
+            out = stdout.read().decode().strip()
+            err = stderr.read().decode().strip()
+            exit_status = stdout.channel.recv_exit_status()
+        except socket.timeout:
+            return "", "SSH Command execution timed out.", 124
+            
         return out, err, exit_status
 
     def close(self):

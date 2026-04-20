@@ -1,5 +1,4 @@
 import base64
-import time
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, 
                              QLabel, QSplitter, QTabWidget, QTableWidget, 
@@ -164,7 +163,6 @@ class MetricsTab(QWidget):
         self.swap_data = []
         self.last_fetched_ts = 0
         
-        # Clear plots visually
         self.cpu_curve.setData([], [])
         self.ram_curve.setData([], [])
         self.rx_curve.setData([], [])
@@ -177,9 +175,8 @@ class MetricsTab(QWidget):
         if not dev: return
         self.btn_deploy.setEnabled(False)
         self.status_lbl.setText("Status: Deploying Agent...")
+        self.status_lbl.setStyleSheet("color: white;")
         
-        # Bash script to create the agent and systemd service.
-        # It writes logs to /dev/shm (RAM) to prevent SSD wear out.
         bash_payload = r"""set -e
 cat << 'EOF' > /usr/local/bin/linux_admin_agent.sh
 #!/bin/bash
@@ -191,12 +188,13 @@ last_tx=0
 
 while true; do
     TS=$(date +%s)
-    cpu=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1}')
+    cpu=$(vmstat 1 2 | tail -1 | awk '{print 100 - $15}')
+    if [ -z "$cpu" ]; then cpu=0; fi
+    
     ram=$(free -m | awk 'NR==2{print $3}')
     swap=$(free -m | awk 'NR==3{print $3}')
     load=$(cat /proc/loadavg | awk '{print $1}')
     
-    # Calculate RX/TX diffs directly in the agent!
     read rx tx <<< $(cat /proc/net/dev | awk -F'[: ]+' 'NR>2 && $2 != "lo" {rx+=$2; tx+=$10} END {print rx" "tx}')
     rx_speed=0; tx_speed=0
     if [ "$last_rx" -ne 0 ]; then
@@ -208,7 +206,6 @@ while true; do
 
     echo "$TS|$cpu|$ram|$swap|$rx_speed|$tx_speed|$load|$disk" >> "$LOG"
 
-    # Ring buffer logic: Slice file in half if it gets too big
     lines=$(wc -l < "$LOG" 2>/dev/null || echo 0)
     if [ "$lines" -gt "$MAX_LINES" ]; then
         tail -n $((MAX_LINES / 2)) "$LOG" > "$TMP" && mv "$TMP" "$LOG"
@@ -242,14 +239,25 @@ systemctl enable --now linux_admin_agent.service
         
         self.worker_deploy = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
         self.worker_deploy.finished.connect(self.on_deploy_finished)
+        self.worker_deploy.error.connect(self.on_deploy_error)
         self.worker_deploy.start()
 
     def on_deploy_finished(self, result):
         self.btn_deploy.setEnabled(True)
         if result['code'] == 0:
+            self.status_lbl.setText("Status: Agent Started. Polling...")
+            self.status_lbl.setStyleSheet("color: #00ff00;")
             QMessageBox.information(self, "Success", "Background Agent Deployed and Running!")
         else:
+            self.status_lbl.setText("Status: Deploy Failed")
+            self.status_lbl.setStyleSheet("color: red;")
             QMessageBox.critical(self, "Error", f"Failed to deploy agent: {result['stderr']}")
+
+    def on_deploy_error(self, err_msg):
+        self.btn_deploy.setEnabled(True)
+        self.status_lbl.setText("Status: Error during deployment.")
+        self.status_lbl.setStyleSheet("color: red;")
+        QMessageBox.critical(self, "Deployment Error", f"Agent deployment failed:\n{err_msg}")
 
     def poll_metrics(self):
         dev = self.device_combo.currentData()
@@ -258,10 +266,10 @@ systemctl enable --now linux_admin_agent.service
             
         self.is_polling = True
         
-        # DELTA FETCH SCRIPT
-        # If last_ts == 0, fetch the last 150 points to populate graph instantly.
-        # Otherwise, strictly fetch rows newer than last_fetched_ts.
+        # '|| true' strictly prevents SIGPIPE and subshell errors from returning a bad exit code
         bash_payload = f"""
+export PATH=$PATH:/usr/bin:/bin:/usr/sbin:/sbin
+
 if [ ! -f /dev/shm/admin_metrics.log ]; then
     echo "AGENT_NOT_RUNNING"
     exit 0
@@ -269,15 +277,15 @@ fi
 
 echo "SYS_METRICS_START"
 if [ "{self.last_fetched_ts}" == "0" ]; then
-    tail -n 150 /dev/shm/admin_metrics.log
+    tail -n 150 /dev/shm/admin_metrics.log || true
 else
-    awk -F'|' -v ts="{self.last_fetched_ts}" '$1 > ts' /dev/shm/admin_metrics.log
+    awk -F'|' -v ts="{self.last_fetched_ts}" '($1+0) > (ts+0)' /dev/shm/admin_metrics.log || true
 fi
 
 echo "===PROCS==="
-ps -eo pid,user,%cpu,%mem,comm --sort=-%cpu | head -n 6
+ps -eo pid,user,%cpu,%mem,comm --sort=-%cpu | head -n 6 || true
 echo "===LOGINS==="
-last -a -n 5
+last -a -n 5 || true
 """
         b64_script = base64.b64encode(bash_payload.encode('utf-8')).decode('utf-8')
         cmd = f"bash -c 'echo {b64_script} | base64 -d | bash'"
@@ -289,27 +297,33 @@ last -a -n 5
 
     def handle_error(self, err_msg):
         self.is_polling = False
-        self.status_lbl.setText(f"Status: SSH Timeout / Error")
+        # Expose the exact SSH/Paramiko exception to the UI
+        self.status_lbl.setText(f"Status: {err_msg}") 
         self.status_lbl.setStyleSheet("color: red;")
 
     def update_ui(self, result):
         self.is_polling = False
-        if result['code'] != 0: return
+        stdout = result.get('stdout', '')
         
-        stdout = result['stdout']
         if "AGENT_NOT_RUNNING" in stdout:
             self.status_lbl.setText("Status: Agent Missing. Please Deploy Agent.")
             self.status_lbl.setStyleSheet("color: orange;")
             return
             
-        if "SYS_METRICS_START" not in stdout: return
-        
+        # Ignore non-zero exit codes. If SYS_METRICS_START is present, we have data.
+        if "SYS_METRICS_START" not in stdout: 
+            if result.get('code', 0) != 0:
+                self.status_lbl.setText(f"Status: Polling Command Failed (Code {result.get('code')})")
+                self.status_lbl.setStyleSheet("color: red;")
+            return
+            
         self.status_lbl.setText("Status: Delta Polling Active")
         self.status_lbl.setStyleSheet("color: #00ff00;")
         
         try:
             parts = stdout.split("===PROCS===")
-            metrics_lines = parts[0].replace("SYS_METRICS_START\n", "").strip().split('\n')
+            metrics_section = parts[0].replace("SYS_METRICS_START", "").strip()
+            metrics_lines = metrics_section.split('\n')
             
             procs_and_logins = parts[1].split("===LOGINS===")
             procs_raw = procs_and_logins[0].strip()
@@ -317,14 +331,15 @@ last -a -n 5
             
             # 1. Parse Delta Metrics Lines
             for line in metrics_lines:
-                if not line.strip() or '|' not in line: continue
+                line = line.strip()
+                if not line or '|' not in line: continue
                 
-                # Format: TS | CPU | RAM | SWAP | RX | TX | LOAD | DISK (used,total,%)
-                ts, cpu, ram, swap, rx, tx, load, disk = line.split('|')
+                m_parts = line.split('|')
+                if len(m_parts) < 8: continue # Safeguard against half-written file reads
                 
+                ts, cpu, ram, swap, rx, tx, load, disk = m_parts[:8]
                 self.last_fetched_ts = int(ts)
                 
-                # Append to arrays
                 self.timestamps.append(int(ts))
                 self.cpu_data.append(float(cpu))
                 self.ram_data.append(float(ram))
@@ -333,19 +348,15 @@ last -a -n 5
                 self.tx_data.append(float(tx))
                 self.load_data.append(float(load))
                 
-                # Cap Python arrays at 10,000 points to prevent local RAM leaks
                 if len(self.timestamps) > 10000:
                     self.timestamps.pop(0)
                     self.cpu_data.pop(0); self.ram_data.pop(0); self.swap_data.pop(0)
                     self.rx_data.pop(0); self.tx_data.pop(0); self.load_data.pop(0)
                     
-                # Update Disk UI Text
                 d_parts = disk.split(',')
                 if len(d_parts) == 3:
                     self.disk_lbl.setText(f"<b>Root Disk Space:</b> {d_parts[0]} Used ({d_parts[1]} / {d_parts[2]})")
 
-            # Update Graphs with relative index points for smooth panning
-            # (Using len range so graphs auto-pan to the right smoothly)
             if self.timestamps:
                 x_axis = list(range(len(self.timestamps)))
                 self.cpu_curve.setData(x_axis, self.cpu_data)
@@ -363,14 +374,15 @@ last -a -n 5
                     fields = line.split()
                     if len(fields) >= 5:
                         self.proc_table.insertRow(i)
-                        self.proc_table.setItem(i, 0, QTableWidgetItem(fields[0])) # PID
-                        self.proc_table.setItem(i, 1, QTableWidgetItem(fields[1])) # USER
-                        self.proc_table.setItem(i, 2, QTableWidgetItem(fields[2])) # CPU
-                        self.proc_table.setItem(i, 3, QTableWidgetItem(fields[3])) # MEM
-                        self.proc_table.setItem(i, 4, QTableWidgetItem(" ".join(fields[4:]))) # COMM
+                        self.proc_table.setItem(i, 0, QTableWidgetItem(fields[0])) 
+                        self.proc_table.setItem(i, 1, QTableWidgetItem(fields[1])) 
+                        self.proc_table.setItem(i, 2, QTableWidgetItem(fields[2])) 
+                        self.proc_table.setItem(i, 3, QTableWidgetItem(fields[3])) 
+                        self.proc_table.setItem(i, 4, QTableWidgetItem(" ".join(fields[4:]))) 
 
             # 3. Update Logins
             self.login_text.setText(logins_raw)
             
         except Exception as e:
-            self.status_lbl.setText(f"Status: Parse Error")
+            self.status_lbl.setText(f"Status: Parse Error - {str(e)}")
+            self.status_lbl.setStyleSheet("color: red;")

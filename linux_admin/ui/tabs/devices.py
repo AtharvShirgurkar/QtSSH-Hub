@@ -3,6 +3,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTa
                              QSplitter, QTextEdit, QFileDialog)
 from PyQt6.QtCore import pyqtSignal, Qt
 import os
+import base64
+from linux_admin.ui.workers import SSHWorker
 
 class DeviceDialog(QDialog):
     def __init__(self, db_mgr, sec_mgr, device_data=None, parent=None):
@@ -17,30 +19,32 @@ class DeviceDialog(QDialog):
         self.port_in = QLineEdit("22")
         self.user_in = QLineEdit("root")
         
-        # Strictly restricted to password or key
         self.auth_type = QComboBox()
         self.auth_type.addItems(["password", "key"])
         
         self.cred_in = QLineEdit()
         self.cred_in.setEchoMode(QLineEdit.EchoMode.Password)
         
-        self._key_content = None # Store multi-line key securely in memory
+        # Multiline text edit specifically for preserving SSH key newlines
+        self.key_in = QTextEdit()
+        self.key_in.setPlaceholderText("Paste your private SSH key here (e.g. -----BEGIN OPENSSH PRIVATE KEY-----)")
+        self.key_in.setVisible(False)
+        self.key_in.setMaximumHeight(100)
         
-        # Browse Button for SSH Key
+        self._key_content = None 
+        
         self.btn_browse = QPushButton("Browse File...")
         self.btn_browse.clicked.connect(self.browse_key_file)
         self.btn_browse.setVisible(False)
         
-        # Layout for credential field + browse button
         cred_layout = QHBoxLayout()
         cred_layout.setContentsMargins(0,0,0,0)
         cred_layout.addWidget(self.cred_in)
+        cred_layout.addWidget(self.key_in)
         cred_layout.addWidget(self.btn_browse)
         
-        # Update UI dynamically based on Auth Type
         self.auth_type.currentTextChanged.connect(self.on_auth_type_changed)
         
-        # Only loads actual existing groups from Database
         self.group_combo = QComboBox()
         self.group_combo.addItem("None", None)
         for g in self.db_mgr.get_groups():
@@ -54,7 +58,6 @@ class DeviceDialog(QDialog):
         self.layout.addRow("Password / Key:", cred_layout)
         self.layout.addRow("Group:", self.group_combo)
         
-        # If Editing, pre-fill data
         if device_data:
             self.name_in.setText(device_data['name'])
             self.ip_in.setText(device_data['ip'])
@@ -66,7 +69,7 @@ class DeviceDialog(QDialog):
                 decrypted_cred = self.sec_mgr.decrypt(device_data['credential'])
                 if device_data['auth_type'] == 'key':
                     self._key_content = decrypted_cred
-                    self.cred_in.setText("<EXISTING_KEY_LOADED>")
+                    self.key_in.setPlainText("<EXISTING_KEY_LOADED>")
                 else:
                     self.cred_in.setText(decrypted_cred)
             except:
@@ -76,7 +79,6 @@ class DeviceDialog(QDialog):
             if idx >= 0:
                 self.group_combo.setCurrentIndex(idx)
         
-        # Ensure correct visibility on launch
         self.on_auth_type_changed(self.auth_type.currentText())
         
         self.btn = QPushButton("Save" if device_data else "Add")
@@ -86,13 +88,15 @@ class DeviceDialog(QDialog):
     def on_auth_type_changed(self, text):
         if text == "key":
             self.btn_browse.setVisible(True)
-            self.cred_in.setPlaceholderText("Use Browse to select your private key...")
+            self.cred_in.setVisible(False)
+            self.key_in.setVisible(True)
         else:
             self.btn_browse.setVisible(False)
+            self.cred_in.setVisible(True)
+            self.key_in.setVisible(False)
             self.cred_in.setPlaceholderText("Enter SSH Password...")
 
     def browse_key_file(self):
-        # Open file browser starting at ~/.ssh if it exists
         start_dir = os.path.expanduser("~/.ssh") if os.path.exists(os.path.expanduser("~/.ssh")) else ""
         file_path, _ = QFileDialog.getOpenFileName(self, "Select SSH Private Key", start_dir, "All Files (*)")
         
@@ -100,16 +104,17 @@ class DeviceDialog(QDialog):
             try:
                 with open(file_path, 'r') as f:
                     self._key_content = f.read()
-                # Use a placeholder in the UI so QLineEdit doesn't strip newlines from the actual key
-                self.cred_in.setText("<KEY_FILE_LOADED>") 
+                self.key_in.setPlainText("<KEY_FILE_LOADED>") 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to read key file:\n{str(e)}")
 
     def get_data(self):
-        cred = self.cred_in.text()
-        # If the user used the file browser or left the existing key untouched, use the stored memory string
-        if self.auth_type.currentText() == "key" and cred in ["<KEY_FILE_LOADED>", "<EXISTING_KEY_LOADED>"]:
-            cred = self._key_content
+        if self.auth_type.currentText() == "key":
+            cred = self.key_in.toPlainText()
+            if cred in ["<KEY_FILE_LOADED>", "<EXISTING_KEY_LOADED>"]:
+                cred = self._key_content
+        else:
+            cred = self.cred_in.text()
             
         return {
             "name": self.name_in.text(), "ip": self.ip_in.text(), "port": int(self.port_in.text()),
@@ -161,11 +166,10 @@ class DevicesTab(QWidget):
         
         layout = QVBoxLayout(self)
         
-        # Visual Splitter for Groups vs Devices
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         layout.addWidget(self.splitter)
         
-        # --- GROUPS WIDGET (Left Side) ---
+        # --- GROUPS WIDGET ---
         groups_widget = QWidget()
         groups_layout = QVBoxLayout(groups_widget)
         groups_layout.setContentsMargins(0, 0, 10, 0)
@@ -187,7 +191,7 @@ class DevicesTab(QWidget):
         
         self.splitter.addWidget(groups_widget)
         
-        # --- DEVICES WIDGET (Right Side) ---
+        # --- DEVICES WIDGET ---
         devices_widget = QWidget()
         devices_layout = QVBoxLayout(devices_widget)
         devices_layout.setContentsMargins(10, 0, 0, 0)
@@ -214,9 +218,8 @@ class DevicesTab(QWidget):
         devices_layout.addWidget(self.table)
         
         self.splitter.addWidget(devices_widget)
-        self.splitter.setSizes([350, 850]) # 30% / 70% width split roughly
+        self.splitter.setSizes([350, 850]) 
         
-        # Connect Signals
         self.btn_add_group.clicked.connect(self.add_group)
         self.btn_remove_group.clicked.connect(self.remove_group)
         self.btn_add_device.clicked.connect(self.add_device)
@@ -228,12 +231,10 @@ class DevicesTab(QWidget):
         self.load_data()
 
     def load_data(self):
-        # Refresh Groups
         self.groups_table.blockSignals(True)
         self.groups_table.setRowCount(0)
         groups = self.db_mgr.get_groups()
         
-        # Default top row for "All Devices"
         self.groups_table.insertRow(0)
         self.groups_table.setItem(0, 0, QTableWidgetItem("-"))
         self.groups_table.setItem(0, 1, QTableWidgetItem("View All Devices"))
@@ -335,10 +336,54 @@ class DevicesTab(QWidget):
             return
             
         device_data = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        reply = QMessageBox.question(self, "Confirm Delete", f"Are you sure you want to remove device '{device_data['name']}' ({device_data['ip']})?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        reply = QMessageBox.question(self, "Confirm Delete", 
+                                     f"Are you sure you want to remove device '{device_data['name']}' ({device_data['ip']})?\n\n"
+                                     "This will attempt to cleanly uninstall the metrics agent from the remote host before deleting.", 
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         
         if reply == QMessageBox.StandardButton.Yes:
-            self.db_mgr.delete_device(device_data['id'])
+            self.btn_remove_device.setEnabled(False)
+            
+            self.cleanup_dialog = QDialog(self)
+            self.cleanup_dialog.setWindowTitle("Removing Device")
+            dlg_layout = QVBoxLayout(self.cleanup_dialog)
+            dlg_layout.addWidget(QLabel("Attempting to clean up background agent on the target device..."))
+            self.cleanup_dialog.setModal(True)
+            self.cleanup_dialog.show()
+
+            # Sequence to cleanly wipe the agent from the target device
+            cleanup_script = """
+            systemctl stop linux_admin_agent.service 2>/dev/null || true
+            systemctl disable linux_admin_agent.service 2>/dev/null || true
+            rm -f /etc/systemd/system/linux_admin_agent.service
+            rm -f /usr/local/bin/linux_admin_agent.sh
+            rm -f /dev/shm/admin_metrics.*
+            systemctl daemon-reload
+            """
+            
+            b64_script = base64.b64encode(cleanup_script.encode('utf-8')).decode('utf-8')
+            cmd = f"bash -c 'echo {b64_script} | base64 -d | bash'"
+            
+            self.cleanup_worker = SSHWorker(device_data, cmd, self.sec_mgr, use_sudo=True)
+            self.cleanup_worker.finished.connect(lambda r: self._finalize_removal(device_data['id']))
+            self.cleanup_worker.error.connect(lambda e: self._finalize_removal_error(device_data['id'], e))
+            self.cleanup_worker.start()
+
+    def _finalize_removal(self, device_id):
+        self.cleanup_dialog.accept()
+        self.btn_remove_device.setEnabled(True)
+        self.db_mgr.delete_device(device_id)
+        self.load_devices()
+
+    def _finalize_removal_error(self, device_id, error_msg):
+        self.cleanup_dialog.accept()
+        self.btn_remove_device.setEnabled(True)
+        reply = QMessageBox.question(self, "Cleanup Failed", 
+                                     f"Could not cleanly wipe the agent from the device due to connection issues:\n{error_msg}\n\n"
+                                     "Force remove it from the application database anyway?", 
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.db_mgr.delete_device(device_id)
             self.load_devices()
 
     def bulk_add(self):
