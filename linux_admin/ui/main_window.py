@@ -8,6 +8,7 @@ from linux_admin.ui.tabs.firewall import FirewallTab
 from linux_admin.ui.tabs.docker import DockerTab
 from linux_admin.ui.tabs.gpu import GPUTab
 from linux_admin.ui.tabs.backups import BackupsTab
+from linux_admin.ui.tabs.users import UsersTab
 
 class MainWindow(QMainWindow):
     def __init__(self, sec_mgr, db_mgr):
@@ -41,7 +42,6 @@ class MainWindow(QMainWindow):
         self.sidebar.setObjectName("Sidebar")
         self.sidebar.setIconSize(QSize(24, 24))
         
-        # Removed Emojis for better compatibility
         menu_items = [
             "Devices & Groups",
             "Realtime Metrics",
@@ -50,6 +50,7 @@ class MainWindow(QMainWindow):
             "Firewall Rules",
             "Docker Manager",
             "NVIDIA GPU",
+            "Users & Permissions", # NEW TAB ADDED
             "Backups & Restore"
         ]
         self.sidebar.addItems(menu_items)
@@ -68,6 +69,7 @@ class MainWindow(QMainWindow):
         self.firewall_tab = FirewallTab(sec_mgr, db_mgr)
         self.docker_tab = DockerTab(sec_mgr, db_mgr)
         self.gpu_tab = GPUTab(sec_mgr, db_mgr)
+        self.users_tab = UsersTab(sec_mgr, db_mgr) # NEW INSTANCE
         self.backups_tab = BackupsTab(sec_mgr, db_mgr)
         
         self.stack.addWidget(self.devices_tab)
@@ -77,6 +79,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.firewall_tab)
         self.stack.addWidget(self.docker_tab)
         self.stack.addWidget(self.gpu_tab)
+        self.stack.addWidget(self.users_tab) # NEW ADDITION
         self.stack.addWidget(self.backups_tab)
         
         # Connect Sidebar to Stack
@@ -90,4 +93,5 @@ class MainWindow(QMainWindow):
         self.devices_tab.devices_changed.connect(self.firewall_tab.refresh_devices)
         self.devices_tab.devices_changed.connect(self.docker_tab.refresh_devices)
         self.devices_tab.devices_changed.connect(self.gpu_tab.refresh_devices)
+        self.devices_tab.devices_changed.connect(self.users_tab.refresh_devices) # NEW CONNECTION
         self.devices_tab.devices_changed.connect(self.backups_tab.refresh_devices)

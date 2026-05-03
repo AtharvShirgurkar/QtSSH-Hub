@@ -1,9 +1,8 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem, 
                              QInputDialog, QMessageBox, QComboBox, QLineEdit, QLabel, QFormLayout, QDialog, QHeaderView,
-                             QSplitter, QTextEdit, QFileDialog, QGroupBox)
+                             QSplitter, QTextEdit, QFileDialog, QGroupBox, QCheckBox)
 from PyQt6.QtCore import pyqtSignal, Qt
 import os
-import base64
 from linux_admin.ui.workers import SSHWorker
 
 class DeviceDialog(QDialog):
@@ -12,7 +11,7 @@ class DeviceDialog(QDialog):
         self.db_mgr = db_mgr
         self.sec_mgr = sec_mgr
         self.setWindowTitle("Edit Device" if device_data else "Add Device")
-        self.resize(500, 400)
+        self.resize(500, 450)
         self.layout = QFormLayout(self)
         
         self.name_in = QLineEdit()
@@ -50,6 +49,8 @@ class DeviceDialog(QDialog):
         for g in self.db_mgr.get_groups():
             self.group_combo.addItem(g['name'], g['id'])
             
+        self.gpu_check = QCheckBox("Node has NVIDIA GPU(s)")
+            
         self.layout.addRow("Display Name:", self.name_in)
         self.layout.addRow("IP Address / Host:", self.ip_in)
         self.layout.addRow("SSH Port:", self.port_in)
@@ -57,6 +58,7 @@ class DeviceDialog(QDialog):
         self.layout.addRow("Auth Type:", self.auth_type)
         self.layout.addRow("Credential:", cred_layout)
         self.layout.addRow("Group:", self.group_combo)
+        self.layout.addRow("", self.gpu_check)
         
         if device_data:
             self.name_in.setText(device_data['name'])
@@ -64,6 +66,7 @@ class DeviceDialog(QDialog):
             self.port_in.setText(str(device_data['port']))
             self.user_in.setText(device_data['username'])
             self.auth_type.setCurrentText(device_data['auth_type'])
+            self.gpu_check.setChecked(bool(device_data.get('has_gpu', 0)))
             
             try:
                 decrypted_cred = self.sec_mgr.decrypt(device_data['credential'])
@@ -119,7 +122,8 @@ class DeviceDialog(QDialog):
         return {
             "name": self.name_in.text(), "ip": self.ip_in.text(), "port": int(self.port_in.text()),
             "username": self.user_in.text(), "auth_type": self.auth_type.currentText(),
-            "credential": cred, "group_id": self.group_combo.currentData()
+            "credential": cred, "group_id": self.group_combo.currentData(),
+            "has_gpu": 1 if self.gpu_check.isChecked() else 0
         }
 
 class DevicesTab(QWidget):
@@ -195,8 +199,8 @@ class DevicesTab(QWidget):
         devices_layout.addLayout(d_controls)
         
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["ID", "Name", "IP Address", "User", "Auth", "Group", "Status"])
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels(["ID", "Name", "IP Address", "User", "Auth", "Group", "GPU", "Status"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -260,6 +264,10 @@ class DevicesTab(QWidget):
             self.table.setItem(i, 4, QTableWidgetItem("Key" if dev['auth_type']=='key' else "Pass"))
             self.table.setItem(i, 5, QTableWidgetItem(str(dev['group'] or 'None')))
             
+            gpu_item = QTableWidgetItem("Yes" if dev.get('has_gpu', 0) == 1 else "No")
+            if dev.get('has_gpu', 0) == 1: gpu_item.setForeground(Qt.GlobalColor.cyan)
+            self.table.setItem(i, 6, gpu_item)
+            
             stat_item = QTableWidgetItem(dev['_status'])
             if dev['_status'] == "Reachable":
                 stat_item.setForeground(Qt.GlobalColor.green)
@@ -268,7 +276,7 @@ class DevicesTab(QWidget):
             else:
                 stat_item.setForeground(Qt.GlobalColor.gray)
             
-            self.table.setItem(i, 6, stat_item)
+            self.table.setItem(i, 7, stat_item)
             
         self.devices_changed.emit()
 
@@ -306,7 +314,7 @@ class DevicesTab(QWidget):
             enc_cred = self.sec_mgr.encrypt(data['credential'])
             self.db_mgr.add_device(
                 data['name'], data['ip'], data['port'], data['username'],
-                data['auth_type'], enc_cred, data['group_id']
+                data['auth_type'], enc_cred, data['group_id'], data['has_gpu']
             )
             self.load_devices()
 
@@ -322,7 +330,7 @@ class DevicesTab(QWidget):
             enc_cred = self.sec_mgr.encrypt(data['credential'])
             self.db_mgr.update_device(
                 device_data['id'], data['name'], data['ip'], data['port'], data['username'],
-                data['auth_type'], enc_cred, data['group_id']
+                data['auth_type'], enc_cred, data['group_id'], data['has_gpu']
             )
             self.load_devices()
 
@@ -401,4 +409,4 @@ class DevicesTab(QWidget):
         if self.pending_tests <= 0:
             self.btn_test_all.setEnabled(True)
             self.btn_test_all.setText("Test All Connections")
-            self.devices_changed.emit() # Broadcast reachability changes to other tabs
+            self.devices_changed.emit()

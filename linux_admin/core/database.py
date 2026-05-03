@@ -19,6 +19,7 @@ class DatabaseManager:
                     name TEXT UNIQUE NOT NULL
                 )
             ''')
+            # Added has_gpu column to the schema
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS devices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,6 +30,7 @@ class DatabaseManager:
                     auth_type TEXT NOT NULL,
                     credential TEXT NOT NULL,
                     group_id INTEGER,
+                    has_gpu INTEGER DEFAULT 0,
                     FOREIGN KEY (group_id) REFERENCES groups(id)
                 )
             ''')
@@ -44,18 +46,18 @@ class DatabaseManager:
             cursor = conn.execute('SELECT id, name FROM groups')
             return [{"id": row[0], "name": row[1]} for row in cursor.fetchall()]
 
-    def add_device(self, name, ip, port, username, auth_type, credential, group_id=None):
+    def add_device(self, name, ip, port, username, auth_type, credential, group_id=None, has_gpu=0):
         with self.get_connection() as conn:
             conn.execute('''
-                INSERT INTO devices (name, ip, port, username, auth_type, credential, group_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (name, ip, port, username, auth_type, credential, group_id))
+                INSERT INTO devices (name, ip, port, username, auth_type, credential, group_id, has_gpu)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (name, ip, port, username, auth_type, credential, group_id, has_gpu))
             conn.commit()
 
     def get_devices(self, group_id=None):
         with self.get_connection() as conn:
             query = '''
-                SELECT d.id, d.name, d.ip, d.port, d.username, d.auth_type, d.credential, g.name, d.group_id 
+                SELECT d.id, d.name, d.ip, d.port, d.username, d.auth_type, d.credential, g.name, d.group_id, d.has_gpu 
                 FROM devices d LEFT JOIN groups g ON d.group_id = g.id
             '''
             params = ()
@@ -65,7 +67,8 @@ class DatabaseManager:
             cursor = conn.execute(query, params)
             return [{
                 "id": row[0], "name": row[1], "ip": row[2], "port": row[3],
-                "username": row[4], "auth_type": row[5], "credential": row[6], "group": row[7], "group_id": row[8]
+                "username": row[4], "auth_type": row[5], "credential": row[6], 
+                "group": row[7], "group_id": row[8], "has_gpu": row[9]
             } for row in cursor.fetchall()]
 
     def delete_device(self, device_id):
@@ -75,13 +78,13 @@ class DatabaseManager:
             if device_id in self.device_status:
                 del self.device_status[device_id]
 
-    def update_device(self, device_id, name, ip, port, username, auth_type, credential, group_id):
+    def update_device(self, device_id, name, ip, port, username, auth_type, credential, group_id, has_gpu):
         with self.get_connection() as conn:
             conn.execute('''
                 UPDATE devices
-                SET name = ?, ip = ?, port = ?, username = ?, auth_type = ?, credential = ?, group_id = ?
+                SET name = ?, ip = ?, port = ?, username = ?, auth_type = ?, credential = ?, group_id = ?, has_gpu = ?
                 WHERE id = ?
-            ''', (name, ip, port, username, auth_type, credential, group_id, device_id))
+            ''', (name, ip, port, username, auth_type, credential, group_id, has_gpu, device_id))
             conn.commit()
 
     def delete_group(self, group_id):

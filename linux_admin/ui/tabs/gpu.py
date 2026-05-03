@@ -119,7 +119,8 @@ class GPUTab(QWidget):
         self.device_combo.blockSignals(True)
         self.device_combo.clear()
         for dev in self.db_mgr.get_devices():
-            if self.db_mgr.device_status.get(dev['id']) == "Reachable":
+            # Only show if reachable AND specifically flagged as having a GPU
+            if self.db_mgr.device_status.get(dev['id']) == "Reachable" and dev.get('has_gpu', 0) == 1:
                 self.device_combo.addItem(f"{dev['name']} ({dev['ip']})", dev)
         self.device_combo.blockSignals(False)
         self.reset_graphs()
