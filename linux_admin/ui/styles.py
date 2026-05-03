@@ -82,8 +82,18 @@ QLineEdit:focus, QComboBox:focus, QTextEdit:focus {
 
 /* FIX: Combobox Dropdown Menus & Arrows */
 QComboBox::drop-down {
-    border: none;
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
     width: 24px;
+    border-left: 1px solid #313244; /* Surface0 divider */
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+}
+QComboBox::drop-down:hover {
+    background-color: #313244; /* Surface0 hover effect */
+}
+QComboBox::drop-down:on {
+    background-color: #45475a; /* Surface1 active/pressed effect */
 }
 QComboBox::down-arrow {
     image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23cdd6f4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>");
@@ -91,27 +101,27 @@ QComboBox::down-arrow {
     height: 14px;
 }
 QComboBox QAbstractItemView {
-    background-color: #181825;
-    color: #cdd6f4;
-    border: 1px solid #313244;
-    border-radius: 6px;
-    selection-background-color: #89b4fa;
-    selection-color: #11111b;
-    outline: 0px;
+    background-color: #181825; /* Mantle */
+    color: #cdd6f4; /* Text */
+    border: 1px solid #313244; /* Surface0 */
+    border-radius: 0px; /* FIX: Prevents black corner artifacts on top-level popups */
+    outline: none;
 }
 QComboBox QAbstractItemView::item {
-    background-color: #181825; /* Fixed: Explicit dark background instead of transparent */
+    background-color: #181825; 
     color: #cdd6f4;
     min-height: 28px;
-    padding-left: 5px;
+    padding-left: 8px; /* Slightly increased for better readability */
+    border: none;
 }
-QComboBox QAbstractItemView::item:hover {
-    background-color: #313244;
+QComboBox QAbstractItemView::item:hover,
+QComboBox QAbstractItemView::item:focus {
+    background-color: #313244; /* Surface0 */
     color: #cdd6f4;
 }
 QComboBox QAbstractItemView::item:selected {
-    background-color: #89b4fa;
-    color: #11111b;
+    background-color: #89b4fa; /* Blue */
+    color: #11111b; /* Crust */
 }
 QComboBox QAbstractScrollArea {
     background-color: transparent;
