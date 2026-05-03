@@ -121,9 +121,18 @@ class PackagesTab(QWidget):
         self.log(f"\n[Ansible] Starting task for {len(devices)} targets...")
         self.btn_run.setEnabled(False)
         
-        self.worker = AnsibleWorker(self.ansible_mgr, devices, pkgs, state)
-        self.worker.finished.connect(self.on_ansible_done)
-        self.worker.start()
+        # --- UPDATED THREAD HANDLING ---
+        if not hasattr(self, 'active_workers'): self.active_workers = []
+        
+        worker = AnsibleWorker(self.ansible_mgr, devices, pkgs, state)
+        worker.finished.connect(self.on_ansible_done)
+        
+        # Auto-cleanup (Accepts out, err, code from AnsibleWorker)
+        worker.finished.connect(lambda o, e, c, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
+        worker.error.connect(lambda e, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
+        
+        self.active_workers.append(worker)
+        worker.start()
 
     def on_ansible_done(self, out, err, code):
         self.log(out)

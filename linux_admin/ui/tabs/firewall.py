@@ -121,9 +121,18 @@ class FirewallTab(QWidget):
         dev = self.device_combo.currentData()
         if not dev: return
         cmd = "if systemctl is-active --quiet ufw; then echo ufw; elif systemctl is-active --quiet firewalld; then echo firewalld; else echo none; fi"
-        self.worker = SSHWorker(dev, cmd, self.sec_mgr)
-        self.worker.finished.connect(self.on_detected)
-        self.worker.start()
+        # --- UPDATED THREAD HANDLING ---
+        if not hasattr(self, 'active_workers'): self.active_workers = []
+        
+        worker = SSHWorker(dev, cmd, self.sec_mgr)
+        worker.finished.connect(self.on_detected)
+        
+        # Auto-cleanup
+        worker.finished.connect(lambda r, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
+        worker.error.connect(lambda e, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
+        
+        self.active_workers.append(worker)
+        worker.start()
         self.fetch_connections()
 
     def on_detected(self, result):
