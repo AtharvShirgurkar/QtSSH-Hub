@@ -102,14 +102,26 @@ class UsersTab(QWidget):
         
         # 3. Delete User
         del_grp = QGroupBox("Remove User")
-        del_lay = QHBoxLayout(del_grp)
+        del_lay = QVBoxLayout(del_grp)
+        
+        del_row1 = QHBoxLayout()
         self.d_user = QLineEdit()
         self.d_user.setPlaceholderText("Username to delete")
         self.btn_del = QPushButton("Delete User")
         self.btn_del.setObjectName("DangerBtn")
         self.btn_del.clicked.connect(self.delete_user)
-        del_lay.addWidget(self.d_user)
-        del_lay.addWidget(self.btn_del)
+        del_row1.addWidget(self.d_user)
+        del_row1.addWidget(self.btn_del)
+        
+        self.d_rm_home = QCheckBox("Remove Home Directory (-r)")
+        self.d_backup = QCheckBox("Backup Home to /root before removal (tar.xz)")
+        self.d_backup.setEnabled(False)
+        self.d_rm_home.toggled.connect(self.d_backup.setEnabled)
+        
+        del_lay.addLayout(del_row1)
+        del_lay.addWidget(self.d_rm_home)
+        del_lay.addWidget(self.d_backup)
+        
         forms_layout.addWidget(del_grp)
         
         forms_layout.addStretch()
@@ -243,9 +255,27 @@ fi
     def delete_user(self):
         user = self.d_user.text().strip()
         if not user: return
+        
+        rm_home = self.d_rm_home.isChecked()
+        backup = self.d_backup.isChecked()
+        
+        cmd_parts = []
+        if rm_home and backup:
+            cmd_parts.append(f'''
+if [ -d "/home/{user}" ]; then
+    echo "Backing up /home/{user} to /root/{user}_home_backup_$(date +%F).tar.xz..."
+    tar -cJf "/root/{user}_home_backup_$(date +%F).tar.xz" -C /home "{user}"
+fi
+''')
+        
+        if rm_home:
+            cmd_parts.append(f'userdel -r "{user}" 2>/dev/null || userdel "{user}"')
+        else:
+            cmd_parts.append(f'userdel "{user}"')
+            
         script = f"""
 if id "{user}" &>/dev/null; then
-    userdel -r "{user}" 2>/dev/null || userdel "{user}"
+    {''.join(cmd_parts)}
     echo "User '{user}' removed from system."
 else
     echo "User '{user}' does not exist."

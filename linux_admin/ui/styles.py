@@ -74,9 +74,145 @@ QLineEdit, QComboBox, QTextEdit {
     padding: 8px;
     color: #cdd6f4;
     selection-background-color: #89b4fa;
+    selection-color: #11111b;
 }
 QLineEdit:focus, QComboBox:focus, QTextEdit:focus {
     border: 1px solid #89b4fa;
+}
+
+/* FIX: Combobox Dropdown Menus & Arrows */
+QComboBox::drop-down {
+    border: none;
+    width: 24px;
+}
+QComboBox::down-arrow {
+    image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23cdd6f4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>");
+    width: 14px;
+    height: 14px;
+}
+QComboBox QAbstractItemView {
+    background-color: #181825;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    border-radius: 6px;
+    selection-background-color: #89b4fa;
+    selection-color: #11111b;
+    outline: 0px;
+}
+QComboBox QAbstractItemView::item {
+    background-color: #181825; /* Fixed: Explicit dark background instead of transparent */
+    color: #cdd6f4;
+    min-height: 28px;
+    padding-left: 5px;
+}
+QComboBox QAbstractItemView::item:hover {
+    background-color: #313244;
+    color: #cdd6f4;
+}
+QComboBox QAbstractItemView::item:selected {
+    background-color: #89b4fa;
+    color: #11111b;
+}
+QComboBox QAbstractScrollArea {
+    background-color: transparent;
+    border: none;
+}
+
+/* FIX: Toggles (Checkboxes and Radio Buttons) */
+QCheckBox, QRadioButton {
+    color: #cdd6f4;
+    spacing: 8px;
+}
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+    border: 2px solid #45475a;
+    border-radius: 4px;
+    background-color: #1e1e2e;
+}
+QCheckBox::indicator:hover {
+    border-color: #89b4fa;
+}
+QCheckBox::indicator:checked {
+    background-color: #89b4fa;
+    border-color: #89b4fa;
+    image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2311111b' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'></polyline></svg>");
+}
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #45475a;
+    border-radius: 9px;
+    background-color: #1e1e2e;
+}
+QRadioButton::indicator:hover {
+    border-color: #89b4fa;
+}
+QRadioButton::indicator:checked {
+    background-color: #89b4fa;
+    border: 4px solid #1e1e2e;
+}
+
+/* FIX: File Dialogs, List Views, and Tree Views */
+QListView, QTreeView {
+    background-color: #181825;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    border-radius: 6px;
+    selection-background-color: #89b4fa;
+    selection-color: #11111b;
+    outline: 0px;
+}
+QTreeView::item, QListView::item {
+    background-color: #181825; /* Fixed: Explicit dark background instead of transparent */
+    color: #cdd6f4;
+    padding: 4px;
+}
+QTreeView::item:hover, QListView::item:hover {
+    background-color: #313244;
+    color: #cdd6f4;
+}
+QTreeView::item:selected, QListView::item:selected {
+    background-color: #89b4fa;
+    color: #11111b;
+}
+
+/* FIX: Scrollbars (Prevents white borders/padding around menus & tables) */
+QScrollBar:vertical {
+    background-color: #181825;
+    width: 12px;
+    margin: 0px;
+    border-radius: 6px;
+}
+QScrollBar::handle:vertical {
+    background-color: #45475a;
+    min-height: 20px;
+    border-radius: 6px;
+}
+QScrollBar::handle:vertical:hover {
+    background-color: #585b70;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+    background: none;
+}
+QScrollBar:horizontal {
+    background-color: #181825;
+    height: 12px;
+    margin: 0px;
+    border-radius: 6px;
+}
+QScrollBar::handle:horizontal {
+    background-color: #45475a;
+    min-width: 20px;
+    border-radius: 6px;
+}
+QScrollBar::handle:horizontal:hover {
+    background-color: #585b70;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+    background: none;
 }
 
 /* Tables */

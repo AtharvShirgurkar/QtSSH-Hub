@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QLabel, QPushButton, QTextEdit, QInputDialog, QMessageBox, QGroupBox, QSplitter
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QLabel, QPushButton, QTextEdit, QInputDialog, QMessageBox, QGroupBox, QSplitter, QFormLayout, QLineEdit
 from PyQt6.QtCore import Qt
 from linux_admin.ui.workers import SSHWorker
 
@@ -33,26 +33,65 @@ class FirewallTab(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         layout.addWidget(splitter)
         
-        # Left Panel: Rules
-        rules_grp = QGroupBox("Firewall Rules")
-        rules_lay = QVBoxLayout(rules_grp)
+        # Left Panel: Rules and Builder
+        left_panel = QWidget()
+        left_lay = QVBoxLayout(left_panel)
+        left_lay.setContentsMargins(0,0,10,0)
+        
+        # Global Actions
+        global_actions = QHBoxLayout()
+        self.btn_enable = QPushButton("Enable Firewall")
+        self.btn_disable = QPushButton("Disable Firewall")
+        self.btn_enable.clicked.connect(lambda: self.run_fw_cmd("enable"))
+        self.btn_disable.clicked.connect(lambda: self.run_fw_cmd("disable"))
+        global_actions.addWidget(self.btn_enable)
+        global_actions.addWidget(self.btn_disable)
+        left_lay.addLayout(global_actions)
+        
+        # Rule Builder
+        build_grp = QGroupBox("Rule Builder")
+        build_lay = QFormLayout(build_grp)
+        
+        self.r_action = QComboBox()
+        self.r_action.addItems(["Allow", "Deny"])
+        self.r_proto = QComboBox()
+        self.r_proto.addItems(["TCP", "UDP", "Both"])
+        self.r_port = QLineEdit()
+        self.r_port.setPlaceholderText("e.g. 80, 443, 8000:8080")
+        self.r_src = QLineEdit()
+        self.r_src.setPlaceholderText("Optional: IP or Subnet (e.g. 192.168.1.0/24)")
+        
+        self.btn_add_rule = QPushButton("Add Rule")
+        self.btn_add_rule.setObjectName("PrimaryBtn")
+        self.btn_add_rule.clicked.connect(self.add_rule)
+        
+        build_lay.addRow("Action:", self.r_action)
+        build_lay.addRow("Protocol:", self.r_proto)
+        build_lay.addRow("Port(s):", self.r_port)
+        build_lay.addRow("Source IP:", self.r_src)
+        build_lay.addRow(self.btn_add_rule)
+        left_lay.addWidget(build_grp)
+        
+        # Delete Rule
+        del_grp = QGroupBox("Remove Rule")
+        del_lay = QHBoxLayout(del_grp)
+        self.r_del_target = QLineEdit()
+        self.r_del_target.setPlaceholderText("Rule Number (ufw) or Port (e.g. 80/tcp)")
+        self.btn_del_rule = QPushButton("Delete")
+        self.btn_del_rule.setObjectName("DangerBtn")
+        self.btn_del_rule.clicked.connect(self.del_rule)
+        del_lay.addWidget(self.r_del_target)
+        del_lay.addWidget(self.btn_del_rule)
+        left_lay.addWidget(del_grp)
+        
+        # Logs
         self.output_log = QTextEdit()
         self.output_log.setReadOnly(True)
         self.output_log.setStyleSheet("background-color: #11111b; font-family: monospace;")
-        rules_lay.addWidget(self.output_log)
+        left_lay.addWidget(QLabel("Execution Output:"))
+        left_lay.addWidget(self.output_log)
         
-        actions = QHBoxLayout()
-        self.btn_enable = QPushButton("Enable")
-        self.btn_disable = QPushButton("Disable")
-        self.btn_add_rule = QPushButton("Allow Port (e.g. 80/tcp)")
-        self.btn_enable.clicked.connect(lambda: self.run_fw_cmd("enable"))
-        self.btn_disable.clicked.connect(lambda: self.run_fw_cmd("disable"))
-        self.btn_add_rule.clicked.connect(self.add_rule)
-        actions.addWidget(self.btn_enable)
-        actions.addWidget(self.btn_disable)
-        actions.addWidget(self.btn_add_rule)
-        rules_lay.addLayout(actions)
-        splitter.addWidget(rules_grp)
+        splitter.addWidget(left_panel)
         
         # Right Panel: Active Connections View
         conn_grp = QGroupBox("Live Active Connections (ss)")
@@ -66,6 +105,7 @@ class FirewallTab(QWidget):
         conn_lay.addWidget(self.btn_refresh_conn)
         splitter.addWidget(conn_grp)
         
+        splitter.setSizes([450, 550])
         self.refresh_devices()
 
     def refresh_devices(self):
@@ -125,8 +165,60 @@ class FirewallTab(QWidget):
 
     def add_rule(self):
         if not self.detected_fw or self.detected_fw == 'none': return
-        port, ok = QInputDialog.getText(self, "Add Rule", "Enter port/proto (e.g. 8080/tcp):")
-        if ok and port:
-            if self.detected_fw == 'ufw': cmd = f"ufw allow {port}"
-            elif self.detected_fw == 'firewalld': cmd = f"firewall-cmd --permanent --add-port={port} && firewall-cmd --reload"
-            self.run_raw_cmd(cmd)
+        
+        action = self.r_action.currentText().lower()
+        proto = self.r_proto.currentText().lower()
+        port = self.r_port.text().strip()
+        src = self.r_src.text().strip()
+        
+        if not port:
+            QMessageBox.warning(self, "Input Error", "Please specify a port or range.")
+            return
+
+        cmd = ""
+        if self.detected_fw == 'ufw':
+            proto_str = "" if proto == "both" else f"proto {proto}"
+            src_str = f"from {src}" if src else "from any"
+            # Normalize firewalld hyphen ranges to ufw colon ranges just in case
+            port = port.replace("-", ":") 
+            cmd = f"ufw {action} {src_str} to any port {port} {proto_str}"
+            
+        elif self.detected_fw == 'firewalld':
+            fw_action = "accept" if action == "allow" else "reject"
+            port = port.replace(":", "-") # Firewalld uses hyphens for ranges
+            
+            if src:
+                # Use rich rule for source specific
+                p_str = "" if proto == "both" else f' protocol="{proto}"'
+                cmd = f"firewall-cmd --permanent --add-rich-rule='rule family=\"ipv4\" source address=\"{src}\" port port=\"{port}\"{p_str} {fw_action}'"
+            else:
+                if action == "deny":
+                    cmd = f"firewall-cmd --permanent --add-rich-rule='rule family=\"ipv4\" port port=\"{port}\" protocol=\"{proto if proto != 'both' else 'tcp'}\" reject'"
+                else:
+                    if proto == "both":
+                        cmd = f"firewall-cmd --permanent --add-port={port}/tcp && firewall-cmd --permanent --add-port={port}/udp"
+                    else:
+                        cmd = f"firewall-cmd --permanent --add-port={port}/{proto}"
+            
+            cmd += " && firewall-cmd --reload"
+            
+        self.run_raw_cmd(cmd)
+        
+    def del_rule(self):
+        if not self.detected_fw or self.detected_fw == 'none': return
+        
+        target = self.r_del_target.text().strip()
+        if not target: return
+        
+        cmd = ""
+        if self.detected_fw == 'ufw':
+            # Target can be a rule number or a command equivalent (e.g. 'allow 80/tcp')
+            cmd = f"ufw --force delete {target}"
+        elif self.detected_fw == 'firewalld':
+            # Simplified removal for standard ports. Rich rules require exact string matching.
+            if '/' in target:
+                cmd = f"firewall-cmd --permanent --remove-port={target} && firewall-cmd --reload"
+            else:
+                cmd = f"firewall-cmd --permanent --remove-port={target}/tcp && firewall-cmd --permanent --remove-port={target}/udp && firewall-cmd --reload"
+                
+        self.run_raw_cmd(cmd)
