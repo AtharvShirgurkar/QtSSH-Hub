@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QLabel, QTextEdit, 
                              QPushButton, QRadioButton, QButtonGroup, QGroupBox, QLineEdit, QSplitter)
 from PyQt6.QtCore import Qt
+import base64
 from linux_admin.core.ansible_manager import AnsibleManager
 from linux_admin.ui.workers import AnsibleWorker, SSHWorker
 
@@ -153,6 +154,11 @@ class PackagesTab(QWidget):
         
         self.log(f"\nInitiating FULL SYSTEM UPDATE on {dev['name']}...")
         cmd = "apt-get update && apt-get upgrade -y || yum update -y"
-        self.w2 = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
+        
+        # Wrap the compound command in base64 so sudo applies to the whole chain
+        b64_cmd = base64.b64encode(cmd.encode('utf-8')).decode('utf-8')
+        safe_cmd = f"bash -c 'echo {b64_cmd} | base64 -d | bash'"
+        
+        self.w2 = SSHWorker(dev, safe_cmd, self.sec_mgr, use_sudo=True)
         self.w2.finished.connect(lambda r: self.log("Update Complete:\n" + r['stdout']))
         self.w2.start()

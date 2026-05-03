@@ -1,5 +1,6 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QLabel, QPushButton, QTextEdit, QInputDialog, QMessageBox, QGroupBox, QSplitter, QFormLayout, QLineEdit
 from PyQt6.QtCore import Qt
+import base64
 from linux_admin.ui.workers import SSHWorker
 
 class FirewallTab(QWidget):
@@ -139,7 +140,12 @@ class FirewallTab(QWidget):
 
     def run_raw_cmd(self, cmd):
         dev = self.device_combo.currentData()
-        self.worker_cmd = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
+        # Wrap the command in base64 to ensure sudo applies to compound commands (&&, ||)
+        # and to safely escape all complex quotes in firewall rich-rules.
+        b64_cmd = base64.b64encode(cmd.encode('utf-8')).decode('utf-8')
+        safe_cmd = f"bash -c 'echo {b64_cmd} | base64 -d | bash'"
+        
+        self.worker_cmd = SSHWorker(dev, safe_cmd, self.sec_mgr, use_sudo=True)
         self.worker_cmd.finished.connect(lambda r: self.output_log.setText(r['stdout'] + "\n" + r['stderr']))
         self.worker_cmd.start()
 
