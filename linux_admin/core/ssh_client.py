@@ -19,12 +19,10 @@ class SSHClientManager:
             if self.auth_type == 'password':
                 self.client.connect(self.ip, port=self.port, username=self.username, password=self.credential, timeout=10)
             elif self.auth_type == 'key':
-                # Sanitize the key format to guarantee proper newlines
                 clean_key = self.credential.replace('\r\n', '\n').strip() + '\n'
                 key_file = io.StringIO(clean_key)
                 pkey = None
                 
-                # Removed DSSKey. Trying RSA, Ed25519, and ECDSA.
                 for key_class in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey):
                     try:
                         key_file.seek(0)
@@ -46,23 +44,17 @@ class SSHClientManager:
             
         if use_sudo:
             if sudo_password:
-                # Use password-based sudo
                 command = f"sudo -S -p '' {command}"
             else:
-                # Use passwordless sudo (-n prevents it from hanging if it prompts)
                 command = f"sudo -n {command}"
             
         stdin, stdout, stderr = self.client.exec_command(command)
         
         if use_sudo and sudo_password:
-            # Write the password directly to the hidden input stream
             stdin.write(sudo_password + "\n")
             stdin.flush()
             
-        # Forcibly close stdin to prevent background commands from hanging
         stdin.close()
-        
-        # Set a hard timeout on the channel to prevent infinite loops
         stdout.channel.settimeout(30.0)
         
         try:

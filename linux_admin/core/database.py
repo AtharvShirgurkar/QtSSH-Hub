@@ -4,6 +4,8 @@ import sqlite3
 class DatabaseManager:
     def __init__(self):
         self.db_path = os.path.expanduser("~/.linux_admin_app/app.db")
+        # In-memory runtime state for device reachability
+        self.device_status = {} 
 
     def get_connection(self):
         return sqlite3.connect(self.db_path)
@@ -11,14 +13,12 @@ class DatabaseManager:
     def init_db(self):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            # Groups Table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS groups (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT UNIQUE NOT NULL
                 )
             ''')
-            # Devices Table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS devices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,6 +72,8 @@ class DatabaseManager:
         with self.get_connection() as conn:
             conn.execute('DELETE FROM devices WHERE id = ?', (device_id,))
             conn.commit()
+            if device_id in self.device_status:
+                del self.device_status[device_id]
 
     def update_device(self, device_id, name, ip, port, username, auth_type, credential, group_id):
         with self.get_connection() as conn:
@@ -84,7 +86,6 @@ class DatabaseManager:
 
     def delete_group(self, group_id):
         with self.get_connection() as conn:
-            # Safely un-link devices from this group before dropping it
             conn.execute('UPDATE devices SET group_id = NULL WHERE group_id = ?', (group_id,))
             conn.execute('DELETE FROM groups WHERE id = ?', (group_id,))
             conn.commit()

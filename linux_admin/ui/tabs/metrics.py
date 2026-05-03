@@ -2,7 +2,7 @@ import base64
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, 
                              QLabel, QSplitter, QTabWidget, QTableWidget, 
-                             QTableWidgetItem, QHeaderView, QTextEdit, QPushButton, QMessageBox)
+                             QTableWidgetItem, QHeaderView, QTextEdit, QPushButton, QMessageBox, QGroupBox)
 from PyQt6.QtCore import QTimer, Qt
 from linux_admin.ui.workers import SSHWorker
 
@@ -12,45 +12,47 @@ class MetricsTab(QWidget):
         self.sec_mgr = sec_mgr
         self.db_mgr = db_mgr
         self.is_polling = False
-        self.last_fetched_ts = 0  # Crucial for Delta Fetching
+        self.last_fetched_ts = 0
         
-        # --- UI Layout ---
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
         
         # Header Selection
         header = QHBoxLayout()
-        header.addWidget(QLabel("Select Device:"))
+        title = QLabel("Realtime Telemetry")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #cdd6f4;")
+        header.addWidget(title)
+        header.addSpacing(30)
+        
+        header.addWidget(QLabel("Target Server:"))
         self.device_combo = QComboBox()
+        self.device_combo.setMinimumWidth(200)
         self.device_combo.currentIndexChanged.connect(self.reset_graphs)
         header.addWidget(self.device_combo)
         
-        self.btn_deploy = QPushButton("Deploy / Start Metrics Agent")
-        self.btn_deploy.setStyleSheet("background-color: #005f87; font-weight: bold;")
+        self.btn_deploy = QPushButton("Deploy Telemetry Agent")
+        self.btn_deploy.setObjectName("PrimaryBtn")
         self.btn_deploy.clicked.connect(self.deploy_agent)
         header.addWidget(self.btn_deploy)
         
-        self.status_lbl = QLabel("Status: Waiting...")
-        header.addWidget(self.status_lbl)
         header.addStretch()
+        self.status_lbl = QLabel("Standby")
+        self.status_lbl.setStyleSheet("font-weight: bold; color: #a6adc8; padding: 5px; background: #313244; border-radius: 5px;")
+        header.addWidget(self.status_lbl)
         layout.addLayout(header)
         
-        # --- Nested Tabs for Cycling Visualizations ---
+        # --- Modern Grid Dashboard ---
         self.viz_tabs = QTabWidget()
         layout.addWidget(self.viz_tabs)
         
-        self.setup_resource_tab()
-        self.setup_network_tab()
-        self.setup_health_tab()
-        self.setup_procs_logins_tab()
+        self.setup_dashboards()
         
-        # --- Data Arrays (Unbounded for history viewing, capped at 10000) ---
+        # --- Data Arrays ---
         self.timestamps = []
         self.cpu_data = []
         self.ram_data = []
         self.rx_data = []
         self.tx_data = []
-        self.load_data = []
-        self.swap_data = []
         
         # --- Poller ---
         self.timer = QTimer()
@@ -59,142 +61,122 @@ class MetricsTab(QWidget):
         
         self.refresh_devices()
 
-    def setup_resource_tab(self):
-        tab = QWidget()
-        layout = QHBoxLayout(tab)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+    def apply_plot_style(self, plot, title):
+        plot.setTitle(title, color="#cdd6f4", size="12pt")
+        if hasattr(plot, 'setBackground'):
+            plot.setBackground('#181825')
+        plot.showGrid(x=True, y=True, alpha=0.2)
+        plot.getAxis('left').setPen('#a6adc8')
+        plot.getAxis('bottom').setPen('#a6adc8')
+        plot.getAxis('left').setTextPen('#cdd6f4')
+        plot.getAxis('bottom').setTextPen('#cdd6f4')
+
+    def setup_dashboards(self):
+        # Tab 1: Core Resources
+        t1 = QWidget()
+        l1 = QHBoxLayout(t1)
+        s1 = QSplitter(Qt.Orientation.Horizontal)
         
-        self.cpu_plot = pg.PlotWidget(title="CPU Usage (%)")
+        self.cpu_plot = pg.PlotWidget(axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
+        self.apply_plot_style(self.cpu_plot, "CPU Utilization (%)")
         self.cpu_plot.setYRange(0, 100)
-        self.cpu_plot.showGrid(x=True, y=True)
-        self.cpu_curve = self.cpu_plot.plot(pen=pg.mkPen('c', width=2))
+        self.cpu_curve = self.cpu_plot.plot(pen=pg.mkPen('#89b4fa', width=3), fillLevel=0, brush=(137,180,250,50))
         
-        self.ram_plot = pg.PlotWidget(title="RAM Usage (MB)")
-        self.ram_plot.showGrid(x=True, y=True)
-        self.ram_curve = self.ram_plot.plot(pen=pg.mkPen('m', width=2))
+        self.ram_plot = pg.PlotWidget(axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
+        self.apply_plot_style(self.ram_plot, "Memory Usage (MB)")
+        self.ram_curve = self.ram_plot.plot(pen=pg.mkPen('#cba6f7', width=3), fillLevel=0, brush=(203,166,247,50))
         
-        splitter.addWidget(self.cpu_plot)
-        splitter.addWidget(self.ram_plot)
-        layout.addWidget(splitter)
-        self.viz_tabs.addTab(tab, "Core Resources")
+        s1.addWidget(self.cpu_plot)
+        s1.addWidget(self.ram_plot)
+        l1.addWidget(s1)
+        self.viz_tabs.addTab(t1, "Core Performance")
 
-    def setup_network_tab(self):
-        tab = QWidget()
-        layout = QHBoxLayout(tab)
-        splitter = QSplitter(Qt.Orientation.Vertical)
+        # Tab 2: Network & Disk Info
+        t2 = QWidget()
+        l2 = QHBoxLayout(t2)
+        s2 = QSplitter(Qt.Orientation.Horizontal)
         
-        self.rx_plot = pg.PlotWidget(title="Network Receive (KB/s)")
-        self.rx_plot.showGrid(x=True, y=True)
-        self.rx_curve = self.rx_plot.plot(pen=pg.mkPen('g', width=2), fillLevel=0, brush=(0,255,0,50))
+        net_widget = pg.GraphicsLayoutWidget()
+        net_widget.setBackground('#181825')
+        self.rx_plot = net_widget.addPlot(title="Net RX (KB/s)", axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
+        self.apply_plot_style(self.rx_plot, "Net RX (KB/s)")
+        self.rx_curve = self.rx_plot.plot(pen=pg.mkPen('#a6e3a1', width=2), fillLevel=0, brush=(166,227,161,50))
+        net_widget.nextRow()
+        self.tx_plot = net_widget.addPlot(title="Net TX (KB/s)", axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
+        self.apply_plot_style(self.tx_plot, "Net TX (KB/s)")
+        self.tx_curve = self.tx_plot.plot(pen=pg.mkPen('#f9e2af', width=2), fillLevel=0, brush=(249,226,175,50))
         
-        self.tx_plot = pg.PlotWidget(title="Network Transmit (KB/s)")
-        self.tx_plot.showGrid(x=True, y=True)
-        self.tx_curve = self.tx_plot.plot(pen=pg.mkPen('y', width=2), fillLevel=0, brush=(255,255,0,50))
+        s2.addWidget(net_widget)
         
-        splitter.addWidget(self.rx_plot)
-        splitter.addWidget(self.tx_plot)
-        layout.addWidget(splitter)
-        self.viz_tabs.addTab(tab, "Network I/O")
+        # Disk and Health Group
+        health_grp = QGroupBox("System Health")
+        hl = QVBoxLayout(health_grp)
+        self.disk_lbl = QLabel("Disk Space: Waiting for data...")
+        self.disk_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #89dceb;")
+        
+        self.sockets_lbl = QLabel("Active Sockets: Waiting...")
+        self.sockets_lbl.setStyleSheet("font-size: 14px; color: #cdd6f4;")
+        
+        hl.addWidget(self.disk_lbl)
+        hl.addWidget(self.sockets_lbl)
+        hl.addStretch()
+        
+        s2.addWidget(health_grp)
+        l2.addWidget(s2)
+        self.viz_tabs.addTab(t2, "Network & Health")
 
-    def setup_health_tab(self):
-        tab = QWidget()
-        layout = QHBoxLayout(tab)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        self.load_plot = pg.PlotWidget(title="System Load Average (1m)")
-        self.load_plot.showGrid(x=True, y=True)
-        self.load_curve = self.load_plot.plot(pen=pg.mkPen('r', width=2))
-        
-        stats_widget = QWidget()
-        stats_layout = QVBoxLayout(stats_widget)
-        self.disk_lbl = QLabel("<b>Root Disk Space:</b> Fetching...")
-        self.disk_lbl.setStyleSheet("font-size: 16px;")
-        
-        self.swap_plot = pg.PlotWidget(title="Swap Memory Used (MB)")
-        self.swap_plot.showGrid(x=True, y=True)
-        self.swap_curve = self.swap_plot.plot(pen=pg.mkPen(color=(255, 165, 0), width=2))
-        
-        stats_layout.addWidget(self.disk_lbl)
-        stats_layout.addWidget(self.swap_plot)
-        
-        splitter.addWidget(self.load_plot)
-        splitter.addWidget(stats_widget)
-        layout.addWidget(splitter)
-        self.viz_tabs.addTab(tab, "System Health")
-
-    def setup_procs_logins_tab(self):
-        tab = QWidget()
-        layout = QHBoxLayout(tab)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        proc_widget = QWidget()
-        proc_layout = QVBoxLayout(proc_widget)
-        proc_layout.addWidget(QLabel("Top 5 Processes by CPU:"))
+        # Tab 3: Processes
+        t3 = QWidget()
+        l3 = QVBoxLayout(t3)
         self.proc_table = QTableWidget()
         self.proc_table.setColumnCount(5)
         self.proc_table.setHorizontalHeaderLabels(["PID", "User", "CPU%", "MEM%", "Command"])
         self.proc_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        proc_layout.addWidget(self.proc_table)
-        
-        login_widget = QWidget()
-        login_layout = QVBoxLayout(login_widget)
-        login_layout.addWidget(QLabel("Recent Logins:"))
-        self.login_text = QTextEdit()
-        self.login_text.setReadOnly(True)
-        login_layout.addWidget(self.login_text)
-        
-        splitter.addWidget(proc_widget)
-        splitter.addWidget(login_widget)
-        layout.addWidget(splitter)
-        self.viz_tabs.addTab(tab, "Processes & Logins")
+        self.proc_table.verticalHeader().setVisible(False)
+        l3.addWidget(QLabel("Top Live Processes:"))
+        l3.addWidget(self.proc_table)
+        self.viz_tabs.addTab(t3, "Processes")
 
     def refresh_devices(self):
+        self.device_combo.blockSignals(True)
         self.device_combo.clear()
         for dev in self.db_mgr.get_devices():
-            self.device_combo.addItem(f"{dev['name']} ({dev['ip']})", dev)
+            if self.db_mgr.device_status.get(dev['id']) == "Reachable":
+                self.device_combo.addItem(f"{dev['name']} ({dev['ip']})", dev)
+        self.device_combo.blockSignals(False)
+        self.reset_graphs()
 
     def reset_graphs(self):
-        self.timestamps = []
-        self.cpu_data = []
-        self.ram_data = []
-        self.rx_data = []
-        self.tx_data = []
-        self.load_data = []
-        self.swap_data = []
+        self.timestamps.clear()
+        self.cpu_data.clear()
+        self.ram_data.clear()
+        self.rx_data.clear()
+        self.tx_data.clear()
         self.last_fetched_ts = 0
         
         self.cpu_curve.setData([], [])
         self.ram_curve.setData([], [])
         self.rx_curve.setData([], [])
         self.tx_curve.setData([], [])
-        self.load_curve.setData([], [])
-        self.swap_curve.setData([], [])
+        self.disk_lbl.setText("Disk Space: Waiting...")
 
     def deploy_agent(self):
         dev = self.device_combo.currentData()
         if not dev: return
         self.btn_deploy.setEnabled(False)
-        self.status_lbl.setText("Status: Deploying Agent...")
-        self.status_lbl.setStyleSheet("color: white;")
+        self.status_lbl.setText("Deploying...")
         
         bash_payload = r"""set -e
 cat << 'EOF' > /usr/local/bin/linux_admin_agent.sh
 #!/bin/bash
 LOG="/dev/shm/admin_metrics.log"
 TMP="/dev/shm/admin_metrics.tmp"
-MAX_LINES=10000
-last_rx=0
-last_tx=0
+last_rx=0; last_tx=0
 
 while true; do
     TS=$(date +%s)
     cpu=$(vmstat 1 2 | tail -1 | awk '{print 100 - $15}')
-    if [ -z "$cpu" ]; then cpu=0; fi
-    
     ram=$(free -m | awk 'NR==2{print $3}')
-    swap=$(free -m | awk 'NR==3{print $3}')
-    load=$(cat /proc/loadavg | awk '{print $1}')
-    
     read rx tx <<< $(cat /proc/net/dev | awk -F'[: ]+' 'NR>2 && $2 != "lo" {rx+=$2; tx+=$10} END {print rx" "tx}')
     rx_speed=0; tx_speed=0
     if [ "$last_rx" -ne 0 ]; then
@@ -204,185 +186,108 @@ while true; do
     last_rx=$rx; last_tx=$tx
     disk=$(df -h / | awk 'NR==2{print $5","$3","$2}')
 
-    echo "$TS|$cpu|$ram|$swap|$rx_speed|$tx_speed|$load|$disk" >> "$LOG"
-
+    echo "$TS|$cpu|$ram|0|$rx_speed|$tx_speed|0|$disk" >> "$LOG"
     lines=$(wc -l < "$LOG" 2>/dev/null || echo 0)
-    if [ "$lines" -gt "$MAX_LINES" ]; then
-        tail -n $((MAX_LINES / 2)) "$LOG" > "$TMP" && mv "$TMP" "$LOG"
-    fi
+    if [ "$lines" -gt "2000" ]; then tail -n 1000 "$LOG" > "$TMP" && mv "$TMP" "$LOG"; fi
     sleep 3
 done
 EOF
 
 chmod +x /usr/local/bin/linux_admin_agent.sh
-
 cat << 'EOF' > /etc/systemd/system/linux_admin_agent.service
 [Unit]
-Description=Linux Admin Live Metrics Agent
-After=network.target
-
+Description=QtSSH Hub Telemetry
 [Service]
-Type=simple
 ExecStart=/usr/local/bin/linux_admin_agent.sh
 Restart=always
-RestartSec=5
-
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable --now linux_admin_agent.service
+systemctl daemon-reload && systemctl enable --now linux_admin_agent.service
 """
-        b64_script = base64.b64encode(bash_payload.encode('utf-8')).decode('utf-8')
-        cmd = f"bash -c 'echo {b64_script} | base64 -d | bash'"
-        
+        cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
         self.worker_deploy = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
-        self.worker_deploy.finished.connect(self.on_deploy_finished)
-        self.worker_deploy.error.connect(self.on_deploy_error)
+        self.worker_deploy.finished.connect(lambda r: self.btn_deploy.setEnabled(True))
         self.worker_deploy.start()
-
-    def on_deploy_finished(self, result):
-        self.btn_deploy.setEnabled(True)
-        if result['code'] == 0:
-            self.status_lbl.setText("Status: Agent Started. Polling...")
-            self.status_lbl.setStyleSheet("color: #00ff00;")
-            QMessageBox.information(self, "Success", "Background Agent Deployed and Running!")
-        else:
-            self.status_lbl.setText("Status: Deploy Failed")
-            self.status_lbl.setStyleSheet("color: red;")
-            QMessageBox.critical(self, "Error", f"Failed to deploy agent: {result['stderr']}")
-
-    def on_deploy_error(self, err_msg):
-        self.btn_deploy.setEnabled(True)
-        self.status_lbl.setText("Status: Error during deployment.")
-        self.status_lbl.setStyleSheet("color: red;")
-        QMessageBox.critical(self, "Deployment Error", f"Agent deployment failed:\n{err_msg}")
 
     def poll_metrics(self):
         dev = self.device_combo.currentData()
-        if not dev or self.is_polling: 
-            return
-            
+        if not dev or self.is_polling: return
         self.is_polling = True
         
-        # '|| true' strictly prevents SIGPIPE and subshell errors from returning a bad exit code
         bash_payload = f"""
-export PATH=$PATH:/usr/bin:/bin:/usr/sbin:/sbin
-
-if [ ! -f /dev/shm/admin_metrics.log ]; then
-    echo "AGENT_NOT_RUNNING"
-    exit 0
-fi
-
-echo "SYS_METRICS_START"
-if [ "{self.last_fetched_ts}" == "0" ]; then
-    tail -n 150 /dev/shm/admin_metrics.log || true
-else
-    awk -F'|' -v ts="{self.last_fetched_ts}" '($1+0) > (ts+0)' /dev/shm/admin_metrics.log || true
-fi
-
-echo "===PROCS==="
+if [ ! -f /dev/shm/admin_metrics.log ]; then echo "MISSING"; exit 0; fi
+echo "DATA"
+awk -F'|' -v ts="{self.last_fetched_ts}" '($1+0) > (ts+0)' /dev/shm/admin_metrics.log || true
+echo "===P==="
 ps -eo pid,user,%cpu,%mem,comm --sort=-%cpu | head -n 6 || true
-echo "===LOGINS==="
-last -a -n 5 || true
+echo "===S==="
+ss -s | grep "TCP:" || true
 """
-        b64_script = base64.b64encode(bash_payload.encode('utf-8')).decode('utf-8')
-        cmd = f"bash -c 'echo {b64_script} | base64 -d | bash'"
-        
+        cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
         self.worker = SSHWorker(dev, cmd, self.sec_mgr)
         self.worker.finished.connect(self.update_ui)
-        self.worker.error.connect(self.handle_error)
+        self.worker.error.connect(lambda e: setattr(self, 'is_polling', False))
         self.worker.start()
-
-    def handle_error(self, err_msg):
-        self.is_polling = False
-        # Expose the exact SSH/Paramiko exception to the UI
-        self.status_lbl.setText(f"Status: {err_msg}") 
-        self.status_lbl.setStyleSheet("color: red;")
 
     def update_ui(self, result):
         self.is_polling = False
         stdout = result.get('stdout', '')
-        
-        if "AGENT_NOT_RUNNING" in stdout:
-            self.status_lbl.setText("Status: Agent Missing. Please Deploy Agent.")
-            self.status_lbl.setStyleSheet("color: orange;")
+        if "MISSING" in stdout:
+            self.status_lbl.setText("Agent Not Running")
+            self.status_lbl.setStyleSheet("color: #f38ba8;")
             return
             
-        # Ignore non-zero exit codes. If SYS_METRICS_START is present, we have data.
-        if "SYS_METRICS_START" not in stdout: 
-            if result.get('code', 0) != 0:
-                self.status_lbl.setText(f"Status: Polling Command Failed (Code {result.get('code')})")
-                self.status_lbl.setStyleSheet("color: red;")
-            return
-            
-        self.status_lbl.setText("Status: Delta Polling Active")
-        self.status_lbl.setStyleSheet("color: #00ff00;")
+        if "DATA" not in stdout: return
+        self.status_lbl.setText("Live")
+        self.status_lbl.setStyleSheet("color: #a6e3a1;")
         
         try:
-            parts = stdout.split("===PROCS===")
-            metrics_section = parts[0].replace("SYS_METRICS_START", "").strip()
-            metrics_lines = metrics_section.split('\n')
+            parts = stdout.split("===P===")
+            metrics = parts[0].replace("DATA\n", "").strip().split('\n')
+            p_s = parts[1].split("===S===")
+            procs = p_s[0].strip().split('\n')
+            sockets = p_s[1].strip() if len(p_s) > 1 else ""
             
-            procs_and_logins = parts[1].split("===LOGINS===")
-            procs_raw = procs_and_logins[0].strip()
-            logins_raw = procs_and_logins[1].strip() if len(procs_and_logins) > 1 else ""
-            
-            # 1. Parse Delta Metrics Lines
-            for line in metrics_lines:
-                line = line.strip()
+            for line in metrics:
                 if not line or '|' not in line: continue
+                m = line.split('|')
+                if len(m) < 8: continue
+                self.last_fetched_ts = int(m[0])
+                self.timestamps.append(int(m[0]))
+                self.cpu_data.append(float(m[1]))
+                self.ram_data.append(float(m[2]))
+                self.rx_data.append(float(m[4]))
+                self.tx_data.append(float(m[5]))
                 
-                m_parts = line.split('|')
-                if len(m_parts) < 8: continue # Safeguard against half-written file reads
+                d = m[7].split(',')
+                if len(d) == 3: self.disk_lbl.setText(f"Root FS: {d[0]} Full ({d[1]} used of {d[2]})")
                 
-                ts, cpu, ram, swap, rx, tx, load, disk = m_parts[:8]
-                self.last_fetched_ts = int(ts)
-                
-                self.timestamps.append(int(ts))
-                self.cpu_data.append(float(cpu))
-                self.ram_data.append(float(ram))
-                self.swap_data.append(float(swap))
-                self.rx_data.append(float(rx))
-                self.tx_data.append(float(tx))
-                self.load_data.append(float(load))
-                
-                if len(self.timestamps) > 10000:
-                    self.timestamps.pop(0)
-                    self.cpu_data.pop(0); self.ram_data.pop(0); self.swap_data.pop(0)
-                    self.rx_data.pop(0); self.tx_data.pop(0); self.load_data.pop(0)
-                    
-                d_parts = disk.split(',')
-                if len(d_parts) == 3:
-                    self.disk_lbl.setText(f"<b>Root Disk Space:</b> {d_parts[0]} Used ({d_parts[1]} / {d_parts[2]})")
+            if len(self.timestamps) > 100:
+                self.timestamps = self.timestamps[-100:]
+                self.cpu_data = self.cpu_data[-100:]
+                self.ram_data = self.ram_data[-100:]
+                self.rx_data = self.rx_data[-100:]
+                self.tx_data = self.tx_data[-100:]
 
             if self.timestamps:
-                x_axis = list(range(len(self.timestamps)))
-                self.cpu_curve.setData(x_axis, self.cpu_data)
-                self.ram_curve.setData(x_axis, self.ram_data)
-                self.rx_curve.setData(x_axis, self.rx_data)
-                self.tx_curve.setData(x_axis, self.tx_data)
-                self.load_curve.setData(x_axis, self.load_data)
-                self.swap_curve.setData(x_axis, self.swap_data)
-
-            # 2. Update Process Table
-            proc_lines = procs_raw.split('\n')
-            if len(proc_lines) > 1:
+                self.cpu_curve.setData(self.timestamps, self.cpu_data)
+                self.ram_curve.setData(self.timestamps, self.ram_data)
+                self.rx_curve.setData(self.timestamps, self.rx_data)
+                self.tx_curve.setData(self.timestamps, self.tx_data)
+                
+            if len(procs) > 1:
                 self.proc_table.setRowCount(0)
-                for i, line in enumerate(proc_lines[1:]):
-                    fields = line.split()
-                    if len(fields) >= 5:
+                for i, line in enumerate(procs[1:]):
+                    f = line.split()
+                    if len(f) >= 5:
                         self.proc_table.insertRow(i)
-                        self.proc_table.setItem(i, 0, QTableWidgetItem(fields[0])) 
-                        self.proc_table.setItem(i, 1, QTableWidgetItem(fields[1])) 
-                        self.proc_table.setItem(i, 2, QTableWidgetItem(fields[2])) 
-                        self.proc_table.setItem(i, 3, QTableWidgetItem(fields[3])) 
-                        self.proc_table.setItem(i, 4, QTableWidgetItem(" ".join(fields[4:]))) 
-
-            # 3. Update Logins
-            self.login_text.setText(logins_raw)
-            
-        except Exception as e:
-            self.status_lbl.setText(f"Status: Parse Error - {str(e)}")
-            self.status_lbl.setStyleSheet("color: red;")
+                        for col, val in enumerate([f[0], f[1], f[2], f[3], " ".join(f[4:])]):
+                            self.proc_table.setItem(i, col, QTableWidgetItem(val))
+                            
+            if sockets:
+                self.sockets_lbl.setText(f"Network Sockets:\n{sockets}")
+                
+        except Exception:
+            pass

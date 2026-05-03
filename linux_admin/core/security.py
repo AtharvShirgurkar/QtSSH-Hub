@@ -31,7 +31,6 @@ class SecurityManager:
         key = self._derive_key(password, salt)
         self.fernet = Fernet(key)
         
-        # Write a verification token
         enc_token = self.fernet.encrypt(b"LINUX_ADMIN_AUTH_SUCCESS")
         with open(self.verify_file, "wb") as f:
             f.write(enc_token)

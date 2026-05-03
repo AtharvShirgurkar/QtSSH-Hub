@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem, 
                              QInputDialog, QMessageBox, QComboBox, QLineEdit, QLabel, QFormLayout, QDialog, QHeaderView,
-                             QSplitter, QTextEdit, QFileDialog)
+                             QSplitter, QTextEdit, QFileDialog, QGroupBox)
 from PyQt6.QtCore import pyqtSignal, Qt
 import os
 import base64
@@ -12,6 +12,7 @@ class DeviceDialog(QDialog):
         self.db_mgr = db_mgr
         self.sec_mgr = sec_mgr
         self.setWindowTitle("Edit Device" if device_data else "Add Device")
+        self.resize(500, 400)
         self.layout = QFormLayout(self)
         
         self.name_in = QLineEdit()
@@ -25,9 +26,8 @@ class DeviceDialog(QDialog):
         self.cred_in = QLineEdit()
         self.cred_in.setEchoMode(QLineEdit.EchoMode.Password)
         
-        # Multiline text edit specifically for preserving SSH key newlines
         self.key_in = QTextEdit()
-        self.key_in.setPlaceholderText("Paste your private SSH key here (e.g. -----BEGIN OPENSSH PRIVATE KEY-----)")
+        self.key_in.setPlaceholderText("Paste private SSH key here (e.g. -----BEGIN OPENSSH PRIVATE KEY-----)")
         self.key_in.setVisible(False)
         self.key_in.setMaximumHeight(100)
         
@@ -50,12 +50,12 @@ class DeviceDialog(QDialog):
         for g in self.db_mgr.get_groups():
             self.group_combo.addItem(g['name'], g['id'])
             
-        self.layout.addRow("Name:", self.name_in)
-        self.layout.addRow("IP Address:", self.ip_in)
+        self.layout.addRow("Display Name:", self.name_in)
+        self.layout.addRow("IP Address / Host:", self.ip_in)
         self.layout.addRow("SSH Port:", self.port_in)
         self.layout.addRow("Username:", self.user_in)
         self.layout.addRow("Auth Type:", self.auth_type)
-        self.layout.addRow("Password / Key:", cred_layout)
+        self.layout.addRow("Credential:", cred_layout)
         self.layout.addRow("Group:", self.group_combo)
         
         if device_data:
@@ -81,7 +81,8 @@ class DeviceDialog(QDialog):
         
         self.on_auth_type_changed(self.auth_type.currentText())
         
-        self.btn = QPushButton("Save" if device_data else "Add")
+        self.btn = QPushButton("Save Details" if device_data else "Add Server")
+        self.btn.setObjectName("PrimaryBtn")
         self.btn.clicked.connect(self.accept)
         self.layout.addRow(self.btn)
 
@@ -99,7 +100,6 @@ class DeviceDialog(QDialog):
     def browse_key_file(self):
         start_dir = os.path.expanduser("~/.ssh") if os.path.exists(os.path.expanduser("~/.ssh")) else ""
         file_path, _ = QFileDialog.getOpenFileName(self, "Select SSH Private Key", start_dir, "All Files (*)")
-        
         if file_path:
             try:
                 with open(file_path, 'r') as f:
@@ -122,39 +122,6 @@ class DeviceDialog(QDialog):
             "credential": cred, "group_id": self.group_combo.currentData()
         }
 
-class BulkAddDialog(QDialog):
-    def __init__(self, db_mgr, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Bulk Add Devices")
-        self.resize(600, 400)
-        layout = QVBoxLayout(self)
-
-        layout.addWidget(QLabel("Target Group (Optional):"))
-        self.group_combo = QComboBox()
-        self.group_combo.addItem("None", None)
-        for g in db_mgr.get_groups():
-            self.group_combo.addItem(g['name'], g['id'])
-        layout.addWidget(self.group_combo)
-
-        instructions = QLabel("Paste CSV data below. One device per line.\nFormat: Name, IP, Port, Username, Auth Type (password/key), Credential")
-        layout.addWidget(instructions)
-        
-        self.text_area = QTextEdit()
-        self.text_area.setPlaceholderText("Web Server 1, 192.168.1.10, 22, root, password, mysecretpass\nDB Server, 10.0.0.5, 2222, admin, key, -----BEGIN RSA PRIVATE KEY-----...")
-        layout.addWidget(self.text_area)
-
-        btns = QHBoxLayout()
-        btn_ok = QPushButton("Import Devices")
-        btn_ok.clicked.connect(self.accept)
-        btn_cancel = QPushButton("Cancel")
-        btn_cancel.clicked.connect(self.reject)
-        btns.addWidget(btn_ok)
-        btns.addWidget(btn_cancel)
-        layout.addLayout(btns)
-
-    def get_data(self):
-        return self.text_area.toPlainText(), self.group_combo.currentData()
-
 class DevicesTab(QWidget):
     devices_changed = pyqtSignal()
 
@@ -163,20 +130,26 @@ class DevicesTab(QWidget):
         self.sec_mgr = sec_mgr
         self.db_mgr = db_mgr
         self.current_group_filter = None
+        self.active_workers = []
+        self.pending_tests = 0
         
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        title = QLabel("Devices & Server Groups")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #cdd6f4;")
+        layout.addWidget(title)
         
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         layout.addWidget(self.splitter)
         
         # --- GROUPS WIDGET ---
-        groups_widget = QWidget()
-        groups_layout = QVBoxLayout(groups_widget)
-        groups_layout.setContentsMargins(0, 0, 10, 0)
+        groups_group = QGroupBox("Groups Filter")
+        groups_layout = QVBoxLayout(groups_group)
         
         g_controls = QHBoxLayout()
         self.btn_add_group = QPushButton("Add Group")
-        self.btn_remove_group = QPushButton("Remove Group")
+        self.btn_remove_group = QPushButton("Remove")
         g_controls.addWidget(self.btn_add_group)
         g_controls.addWidget(self.btn_remove_group)
         groups_layout.addLayout(g_controls)
@@ -184,40 +157,52 @@ class DevicesTab(QWidget):
         self.groups_table = QTableWidget()
         self.groups_table.setColumnCount(2)
         self.groups_table.setHorizontalHeaderLabels(["ID", "Group Name"])
-        self.groups_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.groups_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.groups_table.setColumnWidth(0, 50)
+        self.groups_table.verticalHeader().setVisible(False)
         self.groups_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.groups_table.itemSelectionChanged.connect(self.on_group_selected)
         groups_layout.addWidget(self.groups_table)
         
-        self.splitter.addWidget(groups_widget)
+        self.splitter.addWidget(groups_group)
         
         # --- DEVICES WIDGET ---
-        devices_widget = QWidget()
-        devices_layout = QVBoxLayout(devices_widget)
-        devices_layout.setContentsMargins(10, 0, 0, 0)
+        devices_group = QGroupBox("Server Inventory")
+        devices_layout = QVBoxLayout(devices_group)
         
         d_controls = QHBoxLayout()
-        self.btn_add_device = QPushButton("Add Device")
-        self.btn_edit_device = QPushButton("Edit Device")
-        self.btn_remove_device = QPushButton("Remove Device")
-        self.btn_bulk_add = QPushButton("Bulk Add")
-        self.btn_refresh = QPushButton("Refresh All")
+        self.btn_add_device = QPushButton("Add Server")
+        self.btn_edit_device = QPushButton("Edit")
+        self.btn_remove_device = QPushButton("Remove")
+        self.btn_remove_device.setObjectName("DangerBtn")
+        
+        self.status_filter_combo = QComboBox()
+        self.status_filter_combo.addItems(["All", "Reachable", "Unreachable", "Unknown"])
+        self.status_filter_combo.currentTextChanged.connect(self.load_devices)
+        
+        self.btn_test_conn = QPushButton("Test Selected")
+        self.btn_test_all = QPushButton("Test All Connections") 
+        self.btn_test_all.setObjectName("PrimaryBtn")
         
         d_controls.addWidget(self.btn_add_device)
         d_controls.addWidget(self.btn_edit_device)
         d_controls.addWidget(self.btn_remove_device)
-        d_controls.addWidget(self.btn_bulk_add)
-        d_controls.addWidget(self.btn_refresh)
+        d_controls.addStretch()
+        d_controls.addWidget(QLabel("Filter Status:"))
+        d_controls.addWidget(self.status_filter_combo)
+        d_controls.addWidget(self.btn_test_conn)
+        d_controls.addWidget(self.btn_test_all)
         devices_layout.addLayout(d_controls)
         
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["ID", "Name", "IP", "Username", "Auth Type", "Group"])
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["ID", "Name", "IP Address", "User", "Auth", "Group", "Status"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         devices_layout.addWidget(self.table)
         
-        self.splitter.addWidget(devices_widget)
+        self.splitter.addWidget(devices_group)
         self.splitter.setSizes([350, 850]) 
         
         self.btn_add_group.clicked.connect(self.add_group)
@@ -225,8 +210,8 @@ class DevicesTab(QWidget):
         self.btn_add_device.clicked.connect(self.add_device)
         self.btn_edit_device.clicked.connect(self.edit_device)
         self.btn_remove_device.clicked.connect(self.remove_device)
-        self.btn_bulk_add.clicked.connect(self.bulk_add)
-        self.btn_refresh.clicked.connect(self.load_data)
+        self.btn_test_conn.clicked.connect(self.test_connection)
+        self.btn_test_all.clicked.connect(self.test_all_connections)
         
         self.load_data()
 
@@ -237,7 +222,7 @@ class DevicesTab(QWidget):
         
         self.groups_table.insertRow(0)
         self.groups_table.setItem(0, 0, QTableWidgetItem("-"))
-        self.groups_table.setItem(0, 1, QTableWidgetItem("View All Devices"))
+        self.groups_table.setItem(0, 1, QTableWidgetItem("All Servers"))
         self.groups_table.item(0, 0).setData(Qt.ItemDataRole.UserRole, None)
         
         for i, g in enumerate(groups, start=1):
@@ -253,7 +238,16 @@ class DevicesTab(QWidget):
     def load_devices(self):
         self.table.setRowCount(0)
         devices = self.db_mgr.get_devices(self.current_group_filter)
-        for i, dev in enumerate(devices):
+        status_filter = self.status_filter_combo.currentText()
+        
+        filtered_devices = []
+        for dev in devices:
+            stat = self.db_mgr.device_status.get(dev['id'], "Unknown")
+            if status_filter == "All" or status_filter == stat:
+                dev['_status'] = stat
+                filtered_devices.append(dev)
+
+        for i, dev in enumerate(filtered_devices):
             self.table.insertRow(i)
             
             id_item = QTableWidgetItem(str(dev['id']))
@@ -263,8 +257,18 @@ class DevicesTab(QWidget):
             self.table.setItem(i, 1, QTableWidgetItem(dev['name']))
             self.table.setItem(i, 2, QTableWidgetItem(dev['ip']))
             self.table.setItem(i, 3, QTableWidgetItem(dev['username']))
-            self.table.setItem(i, 4, QTableWidgetItem(dev['auth_type']))
+            self.table.setItem(i, 4, QTableWidgetItem("Key" if dev['auth_type']=='key' else "Pass"))
             self.table.setItem(i, 5, QTableWidgetItem(str(dev['group'] or 'None')))
+            
+            stat_item = QTableWidgetItem(dev['_status'])
+            if dev['_status'] == "Reachable":
+                stat_item.setForeground(Qt.GlobalColor.green)
+            elif dev['_status'] == "Unreachable":
+                stat_item.setForeground(Qt.GlobalColor.red)
+            else:
+                stat_item.setForeground(Qt.GlobalColor.gray)
+            
+            self.table.setItem(i, 6, stat_item)
             
         self.devices_changed.emit()
 
@@ -284,14 +288,12 @@ class DevicesTab(QWidget):
             
     def remove_group(self):
         row = self.groups_table.currentRow()
-        if row <= 0: 
-            QMessageBox.warning(self, "Warning", "Please select a valid custom group to remove.")
-            return
+        if row <= 0: return
             
         group_id = self.groups_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
         group_name = self.groups_table.item(row, 1).text()
         
-        reply = QMessageBox.question(self, "Confirm Delete", f"Remove group '{group_name}'? (Devices inside will NOT be deleted, they will just lose their group assignment).", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        reply = QMessageBox.question(self, "Confirm Delete", f"Remove group '{group_name}'? Devices will NOT be deleted.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
             self.db_mgr.delete_group(group_id)
             self.current_group_filter = None
@@ -301,9 +303,6 @@ class DevicesTab(QWidget):
         dlg = DeviceDialog(self.db_mgr, self.sec_mgr, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             data = dlg.get_data()
-            if not data['name'] or not data['ip'] or not data['credential']:
-                QMessageBox.warning(self, "Error", "Name, IP, and Credential cannot be empty!")
-                return
             enc_cred = self.sec_mgr.encrypt(data['credential'])
             self.db_mgr.add_device(
                 data['name'], data['ip'], data['port'], data['username'],
@@ -313,9 +312,7 @@ class DevicesTab(QWidget):
 
     def edit_device(self):
         row = self.table.currentRow()
-        if row < 0:
-            QMessageBox.warning(self, "Warning", "Please select a device to edit.")
-            return
+        if row < 0: return
             
         device_data = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
         dlg = DeviceDialog(self.db_mgr, self.sec_mgr, device_data, self)
@@ -331,87 +328,77 @@ class DevicesTab(QWidget):
 
     def remove_device(self):
         row = self.table.currentRow()
-        if row < 0:
-            QMessageBox.warning(self, "Warning", "Please select a device to remove.")
-            return
-            
+        if row < 0: return
         device_data = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        reply = QMessageBox.question(self, "Confirm Delete", 
-                                     f"Are you sure you want to remove device '{device_data['name']}' ({device_data['ip']})?\n\n"
-                                     "This will attempt to cleanly uninstall the metrics agent from the remote host before deleting.", 
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        
+        reply = QMessageBox.question(self, "Confirm Delete", f"Remove device '{device_data['name']}'?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
-            self.btn_remove_device.setEnabled(False)
-            
-            self.cleanup_dialog = QDialog(self)
-            self.cleanup_dialog.setWindowTitle("Removing Device")
-            dlg_layout = QVBoxLayout(self.cleanup_dialog)
-            dlg_layout.addWidget(QLabel("Attempting to clean up background agent on the target device..."))
-            self.cleanup_dialog.setModal(True)
-            self.cleanup_dialog.show()
+            self.db_mgr.delete_device(device_data['id'])
+            self.load_devices()
 
-            # Sequence to cleanly wipe the agent from the target device
-            cleanup_script = """
-            systemctl stop linux_admin_agent.service 2>/dev/null || true
-            systemctl disable linux_admin_agent.service 2>/dev/null || true
-            rm -f /etc/systemd/system/linux_admin_agent.service
-            rm -f /usr/local/bin/linux_admin_agent.sh
-            rm -f /dev/shm/admin_metrics.*
-            systemctl daemon-reload
-            """
-            
-            b64_script = base64.b64encode(cleanup_script.encode('utf-8')).decode('utf-8')
-            cmd = f"bash -c 'echo {b64_script} | base64 -d | bash'"
-            
-            self.cleanup_worker = SSHWorker(device_data, cmd, self.sec_mgr, use_sudo=True)
-            self.cleanup_worker.finished.connect(lambda r: self._finalize_removal(device_data['id']))
-            self.cleanup_worker.error.connect(lambda e: self._finalize_removal_error(device_data['id'], e))
-            self.cleanup_worker.start()
+    def test_connection(self):
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "Select Device", "Please select a device to test.")
+            return
+        
+        device_data = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        self.btn_test_conn.setEnabled(False)
+        self.btn_test_conn.setText("Testing...")
+        
+        self.test_worker = SSHWorker(device_data, "echo 'Connection Successful!'", self.sec_mgr)
+        self.test_worker.finished.connect(self.on_test_finished)
+        self.test_worker.error.connect(lambda err_msg, d=device_data: self.on_test_error(err_msg, d))
+        self.test_worker.start()
 
-    def _finalize_removal(self, device_id):
-        self.cleanup_dialog.accept()
-        self.btn_remove_device.setEnabled(True)
-        self.db_mgr.delete_device(device_id)
+    def on_test_finished(self, result):
+        self.btn_test_conn.setEnabled(True)
+        self.btn_test_conn.setText("Test Selected")
+        dev_id = result['device']['id']
+        
+        if result['code'] == 0:
+            self.db_mgr.device_status[dev_id] = "Reachable"
+            QMessageBox.information(self, "Success", f"Successfully connected to {result['device']['name']}!")
+        else:
+            self.db_mgr.device_status[dev_id] = "Unreachable"
+            QMessageBox.warning(self, "Failed", f"Connected, but command failed:\n{result['stderr']}")
         self.load_devices()
 
-    def _finalize_removal_error(self, device_id, error_msg):
-        self.cleanup_dialog.accept()
-        self.btn_remove_device.setEnabled(True)
-        reply = QMessageBox.question(self, "Cleanup Failed", 
-                                     f"Could not cleanly wipe the agent from the device due to connection issues:\n{error_msg}\n\n"
-                                     "Force remove it from the application database anyway?", 
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            self.db_mgr.delete_device(device_id)
-            self.load_devices()
+    def on_test_error(self, err_msg, dev):
+        self.btn_test_conn.setEnabled(True)
+        self.btn_test_conn.setText("Test Selected")
+        self.db_mgr.device_status[dev['id']] = "Unreachable"
+        QMessageBox.critical(self, "Connection Error", f"Failed to connect to {dev['name']}:\n{err_msg}")
+        self.load_devices()
 
-    def bulk_add(self):
-        dlg = BulkAddDialog(self.db_mgr, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            text_data, target_group_id = dlg.get_data()
-            lines = text_data.strip().split('\n')
-            
-            added_count = 0
-            for line in lines:
-                if not line.strip(): continue
-                parts = [p.strip() for p in line.split(',')]
-                
-                if len(parts) >= 6:
-                    name, ip, port, username, auth_type, credential = parts[0], parts[1], parts[2], parts[3], parts[4], ','.join(parts[5:])
-                    
-                    try: port = int(port)
-                    except: port = 22
-                    
-                    if auth_type not in ["password", "key"]: auth_type = "password"
-                    
-                    enc_cred = self.sec_mgr.encrypt(credential)
-                    self.db_mgr.add_device(name, ip, port, username, auth_type, enc_cred, target_group_id)
-                    added_count += 1
-            
-            if added_count > 0:
-                QMessageBox.information(self, "Success", f"Successfully imported {added_count} devices in bulk!")
-            else:
-                QMessageBox.warning(self, "Warning", "No valid devices found. Check the CSV format.")
-                
-            self.load_devices()
+    def test_all_connections(self):
+        devices = self.db_mgr.get_devices()
+        if not devices: return
+        
+        self.btn_test_all.setEnabled(False)
+        self.btn_test_all.setText("Testing All...")
+        self.active_workers = []
+        self.pending_tests = len(devices)
+        
+        for dev in devices:
+            worker = SSHWorker(dev, "echo 1", self.sec_mgr)
+            worker.finished.connect(self.on_test_all_finished)
+            worker.error.connect(lambda err_msg, d=dev: self.on_test_all_error(err_msg, d))
+            self.active_workers.append(worker)
+            worker.start()
+
+    def on_test_all_finished(self, result):
+        dev_id = result['device']['id']
+        self.db_mgr.device_status[dev_id] = "Reachable" if result['code'] == 0 else "Unreachable"
+        self._check_test_all_done()
+
+    def on_test_all_error(self, err_msg, dev):
+        self.db_mgr.device_status[dev['id']] = "Unreachable"
+        self._check_test_all_done()
+
+    def _check_test_all_done(self):
+        self.pending_tests -= 1
+        self.load_devices()
+        if self.pending_tests <= 0:
+            self.btn_test_all.setEnabled(True)
+            self.btn_test_all.setText("Test All Connections")
+            self.devices_changed.emit() # Broadcast reachability changes to other tabs

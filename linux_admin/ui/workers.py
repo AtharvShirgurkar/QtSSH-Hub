@@ -22,7 +22,6 @@ class SSHWorker(QThread):
                 self.device_data['auth_type'], 
                 cred
             )
-            # Only send sudo password if auth type relies on passwords
             sudo_pwd = cred if (self.use_sudo and self.device_data['auth_type'] == 'password') else None
             out, err, code = client.execute(self.command, use_sudo=self.use_sudo, sudo_password=sudo_pwd)
             client.close()

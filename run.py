@@ -1,34 +1,45 @@
 import sys
 import os
 from PyQt6.QtWidgets import QApplication, QInputDialog, QMessageBox, QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton
-from qt_material import apply_stylesheet
+from PyQt6.QtCore import Qt
 
 from linux_admin.core.security import SecurityManager
 from linux_admin.core.database import DatabaseManager
 from linux_admin.ui.main_window import MainWindow
+from linux_admin.ui.styles import APP_STYLE
 
 class LoginDialog(QDialog):
     def __init__(self, sec_mgr, db_mgr):
         super().__init__()
         self.sec_mgr = sec_mgr
         self.db_mgr = db_mgr
-        self.setWindowTitle("Linux Admin - Secure Login")
-        self.setFixedSize(350, 150)
+        self.setWindowTitle("QtSSH Hub - Secure Login")
+        self.setFixedSize(400, 200)
+        self.setStyleSheet(APP_STYLE)
         
         layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        title = QLabel("QtSSH Hub")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #89b4fa;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
         
         if not self.sec_mgr.is_initialized():
-            self.label = QLabel("Welcome! Please set a Master Password to encrypt your data:")
+            self.label = QLabel("Welcome! Setup a Master Password to encrypt your data:")
         else:
-            self.label = QLabel("Enter your Master Password:")
-            
+            self.label = QLabel("Enter your Master Password to decrypt vault:")
+        
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.label)
         
         self.password_input = QLineEdit()
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_input.setPlaceholderText("Master Password...")
         layout.addWidget(self.password_input)
         
-        self.login_btn = QPushButton("Login / Setup")
+        self.login_btn = QPushButton("Unlock Vault" if self.sec_mgr.is_initialized() else "Initialize Vault")
+        self.login_btn.setObjectName("PrimaryBtn")
         self.login_btn.clicked.connect(self.authenticate)
         layout.addWidget(self.login_btn)
         
@@ -52,7 +63,7 @@ class LoginDialog(QDialog):
 
 def main():
     app = QApplication(sys.argv)
-    apply_stylesheet(app, theme='dark_teal.xml')
+    app.setStyleSheet(APP_STYLE)
     
     # Ensure app directory exists
     os.makedirs(os.path.expanduser("~/.linux_admin_app"), exist_ok=True)
