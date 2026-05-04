@@ -93,13 +93,14 @@ class DockerTab(QWidget):
         # --- UPDATED THREAD HANDLING ---
         if not hasattr(self, 'active_workers'): self.active_workers = []
         
+        # 1. Safely sweep old, dead threads from previous runs
+        self.active_workers = [w for w in self.active_workers if w.isRunning()]
+        
+        # 2. Create and connect the new worker
         worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
         worker.finished.connect(self.populate_table)
         
-        # Auto-cleanup
-        worker.finished.connect(lambda r, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
-        worker.error.connect(lambda e, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
-        
+        # 3. Add to list and start
         self.active_workers.append(worker)
         worker.start()
 

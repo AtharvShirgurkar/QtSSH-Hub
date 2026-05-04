@@ -123,13 +123,10 @@ class PackagesTab(QWidget):
         
         # --- UPDATED THREAD HANDLING ---
         if not hasattr(self, 'active_workers'): self.active_workers = []
+        self.active_workers = [w for w in self.active_workers if w.isRunning()]
         
         worker = AnsibleWorker(self.ansible_mgr, devices, pkgs, state)
         worker.finished.connect(self.on_ansible_done)
-        
-        # Auto-cleanup (Accepts out, err, code from AnsibleWorker)
-        worker.finished.connect(lambda o, e, c, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
-        worker.error.connect(lambda e, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
         
         self.active_workers.append(worker)
         worker.start()

@@ -228,14 +228,11 @@ ss -s | grep "TCP:" || true
         cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
         # --- UPDATED THREAD HANDLING ---
         if not hasattr(self, 'active_workers'): self.active_workers = []
+        self.active_workers = [w for w in self.active_workers if w.isRunning()]
         
         worker = SSHWorker(dev, cmd, self.sec_mgr)
         worker.finished.connect(self.update_ui)
         worker.error.connect(lambda e: setattr(self, 'is_polling', False))
-        
-        # Auto-cleanup
-        worker.finished.connect(lambda r, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
-        worker.error.connect(lambda e, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
         
         self.active_workers.append(worker)
         worker.start()
