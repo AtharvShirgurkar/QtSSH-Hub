@@ -3,7 +3,7 @@ import pyqtgraph as pg
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, 
                              QLabel, QSplitter, QTabWidget, QTableWidget, 
                              QTableWidgetItem, QHeaderView, QTextEdit, QPushButton, 
-                             QMessageBox, QGroupBox, QLineEdit, QInputDialog)
+                             QMessageBox, QGroupBox, QLineEdit, QInputDialog, QDialog)
 from PyQt6.QtCore import QTimer, Qt
 from linux_admin.ui.workers import SSHWorker
 
@@ -150,10 +150,16 @@ class MetricsTab(QWidget):
         self.btn_renice.setToolTip("Change process CPU scheduling priority")
         self.btn_renice.clicked.connect(lambda: self.manage_process('renice'))
         
+        self.btn_inspect = QPushButton("Inspect Info")
+        self.btn_inspect.setObjectName("PrimaryBtn")
+        self.btn_inspect.setToolTip("Deep inspection: Open files, sockets, full command line")
+        self.btn_inspect.clicked.connect(lambda: self.manage_process('inspect'))
+        
         proc_controls.addWidget(self.proc_search)
         proc_controls.addWidget(self.btn_term)
         proc_controls.addWidget(self.btn_kill)
         proc_controls.addWidget(self.btn_renice)
+        proc_controls.addWidget(self.btn_inspect)
         l3.addLayout(proc_controls)
         
         self.proc_table = QTableWidget()
@@ -276,12 +282,54 @@ systemctl daemon-reload && systemctl enable --now linux_admin_agent.service
             val, ok = QInputDialog.getInt(self, "Renice Process", f"Set CPU Nice value (-20 to 19) for {comm}\nLower values = Higher priority:", 0, -20, 19)
             if ok:
                 cmd = f"renice -n {val} -p {pid}"
+        elif action == "inspect":
+            self.status_lbl.setText("Inspecting...")
+            bash_payload = f"""
+            echo "=== Process Details for PID {pid} ({comm}) ==="
+            ps -p {pid} -o user,pid,ppid,state,nice,pcpu,pmem,start,etime,args || echo "Process might have exited"
+            echo -e "\\n=== Current Working Directory ==="
+            readlink -f /proc/{pid}/cwd || echo "Access Denied / Not Found"
+            echo -e "\\n=== Active Network Sockets ==="
+            ss -tunap 2>/dev/null | grep "pid={pid}," || echo "No network connections found"
+            echo -e "\\n=== Open File Descriptors (Max 25) ==="
+            ls -l /proc/{pid}/fd 2>/dev/null | head -n 25 || echo "Access Denied"
+            """
+            b64_cmd = base64.b64encode(bash_payload.encode()).decode()
+            cmd = f"bash -c 'echo {b64_cmd} | base64 -d | bash'"
                 
         if cmd:
             worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
-            worker.finished.connect(lambda r: self.status_lbl.setText(f"Proc Cmd: {'Success' if r['code'] == 0 else 'Failed'}"))
+            if action == "inspect":
+                worker.finished.connect(self.show_inspect_dialog)
+            else:
+                worker.finished.connect(lambda r: self.status_lbl.setText(f"Proc Cmd: {'Success' if r['code'] == 0 else 'Failed'}"))
             self.active_workers.append(worker)
             worker.start()
+
+    def show_inspect_dialog(self, result):
+        self.status_lbl.setText("Live")
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Deep Process Inspection")
+        dlg.resize(850, 650)
+        lay = QVBoxLayout(dlg)
+        
+        txt = QTextEdit()
+        txt.setReadOnly(True)
+        
+        if result['code'] == 0:
+            txt.setStyleSheet("background-color: #11111b; font-family: monospace; color: #a6e3a1; font-size: 13px;")
+            txt.setText(result['stdout'])
+        else:
+            txt.setStyleSheet("background-color: #11111b; font-family: monospace; color: #f38ba8; font-size: 13px;")
+            txt.setText(f"Error fetching details:\n{result['stderr']}\n\n{result['stdout']}")
+            
+        lay.addWidget(txt)
+        
+        btn = QPushButton("Close Inspection")
+        btn.clicked.connect(dlg.accept)
+        lay.addWidget(btn)
+        
+        dlg.exec()
 
     def poll_metrics(self):
         dev = self.device_combo.currentData()
