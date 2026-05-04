@@ -2,7 +2,8 @@ import base64
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, 
                              QLabel, QSplitter, QTabWidget, QTableWidget, 
-                             QTableWidgetItem, QHeaderView, QTextEdit, QPushButton, QMessageBox, QGroupBox)
+                             QTableWidgetItem, QHeaderView, QTextEdit, QPushButton, 
+                             QMessageBox, QGroupBox, QLineEdit, QInputDialog)
 from PyQt6.QtCore import QTimer, Qt
 from linux_admin.ui.workers import SSHWorker
 
@@ -13,6 +14,7 @@ class MetricsTab(QWidget):
         self.db_mgr = db_mgr
         self.is_polling = False
         self.last_fetched_ts = 0
+        self.active_workers = []
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -128,14 +130,41 @@ class MetricsTab(QWidget):
         # Tab 3: Processes
         t3 = QWidget()
         l3 = QVBoxLayout(t3)
+        
+        # Search & Action controls for Processes
+        proc_controls = QHBoxLayout()
+        self.proc_search = QLineEdit()
+        self.proc_search.setPlaceholderText("Search processes by PID, User, or Command...")
+        self.proc_search.textChanged.connect(self.filter_processes)
+        
+        self.btn_term = QPushButton("Term (15)")
+        self.btn_term.setToolTip("Send SIGTERM (Graceful exit)")
+        self.btn_term.clicked.connect(lambda: self.manage_process('term'))
+        
+        self.btn_kill = QPushButton("Kill (9)")
+        self.btn_kill.setObjectName("DangerBtn")
+        self.btn_kill.setToolTip("Send SIGKILL (Force quit)")
+        self.btn_kill.clicked.connect(lambda: self.manage_process('kill'))
+        
+        self.btn_renice = QPushButton("Renice")
+        self.btn_renice.setToolTip("Change process CPU scheduling priority")
+        self.btn_renice.clicked.connect(lambda: self.manage_process('renice'))
+        
+        proc_controls.addWidget(self.proc_search)
+        proc_controls.addWidget(self.btn_term)
+        proc_controls.addWidget(self.btn_kill)
+        proc_controls.addWidget(self.btn_renice)
+        l3.addLayout(proc_controls)
+        
         self.proc_table = QTableWidget()
         self.proc_table.setColumnCount(5)
         self.proc_table.setHorizontalHeaderLabels(["PID", "User", "CPU%", "MEM%", "Command"])
         self.proc_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.proc_table.verticalHeader().setVisible(False)
-        l3.addWidget(QLabel("Top Live Processes:"))
+        self.proc_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         l3.addWidget(self.proc_table)
-        self.viz_tabs.addTab(t3, "Processes")
+        
+        self.viz_tabs.addTab(t3, "Processes (Top 100)")
 
     def refresh_devices(self):
         self.device_combo.blockSignals(True)
@@ -159,6 +188,7 @@ class MetricsTab(QWidget):
         self.rx_curve.setData([], [])
         self.tx_curve.setData([], [])
         self.disk_lbl.setText("Disk Space: Waiting...")
+        self.proc_table.setRowCount(0)
 
     def deploy_agent(self):
         dev = self.device_combo.currentData()
@@ -207,32 +237,76 @@ EOF
 systemctl daemon-reload && systemctl enable --now linux_admin_agent.service
 """
         cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
-        self.worker_deploy = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
-        self.worker_deploy.finished.connect(lambda r: self.btn_deploy.setEnabled(True))
-        self.worker_deploy.start()
+        worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
+        worker.finished.connect(lambda r: self.btn_deploy.setEnabled(True))
+        self.active_workers.append(worker)
+        worker.start()
+
+    def filter_processes(self):
+        search_term = self.proc_search.text().lower()
+        for row in range(self.proc_table.rowCount()):
+            pid = self.proc_table.item(row, 0).text().lower()
+            user = self.proc_table.item(row, 1).text().lower()
+            comm = self.proc_table.item(row, 4).text().lower()
+            
+            if search_term in pid or search_term in comm or search_term in user:
+                self.proc_table.setRowHidden(row, False)
+            else:
+                self.proc_table.setRowHidden(row, True)
+
+    def manage_process(self, action):
+        dev = self.device_combo.currentData()
+        row = self.proc_table.currentRow()
+        
+        if not dev or row < 0:
+            QMessageBox.warning(self, "No Selection", "Please select a process from the list first.")
+            return
+            
+        pid = self.proc_table.item(row, 0).text()
+        comm = self.proc_table.item(row, 4).text()
+        cmd = ""
+        
+        if action == "term":
+            if QMessageBox.question(self, "Confirm Term", f"Send SIGTERM to {comm} (PID {pid})?") == QMessageBox.StandardButton.Yes:
+                cmd = f"kill -15 {pid}"
+        elif action == "kill":
+            if QMessageBox.question(self, "Confirm Kill", f"Force KILL {comm} (PID {pid})?\nThis might cause data loss.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+                cmd = f"kill -9 {pid}"
+        elif action == "renice":
+            val, ok = QInputDialog.getInt(self, "Renice Process", f"Set CPU Nice value (-20 to 19) for {comm}\nLower values = Higher priority:", 0, -20, 19)
+            if ok:
+                cmd = f"renice -n {val} -p {pid}"
+                
+        if cmd:
+            worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
+            worker.finished.connect(lambda r: self.status_lbl.setText(f"Proc Cmd: {'Success' if r['code'] == 0 else 'Failed'}"))
+            self.active_workers.append(worker)
+            worker.start()
 
     def poll_metrics(self):
         dev = self.device_combo.currentData()
         if not dev or self.is_polling: return
         self.is_polling = True
         
+        # Extended head to 100 so the user has more processes to search and kill
         bash_payload = f"""
 if [ ! -f /dev/shm/admin_metrics.log ]; then echo "MISSING"; exit 0; fi
 echo "DATA"
 awk -F'|' -v ts="{self.last_fetched_ts}" '($1+0) > (ts+0)' /dev/shm/admin_metrics.log || true
 echo "===P==="
-ps -eo pid,user,%cpu,%mem,comm --sort=-%cpu | head -n 6 || true
+ps -eo pid,user,%cpu,%mem,comm --sort=-%cpu | head -n 100 || true
 echo "===S==="
 ss -s | grep "TCP:" || true
 """
         cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
-        # --- UPDATED THREAD HANDLING ---
-        if not hasattr(self, 'active_workers'): self.active_workers = []
-        self.active_workers = [w for w in self.active_workers if w.isRunning()]
         
         worker = SSHWorker(dev, cmd, self.sec_mgr)
         worker.finished.connect(self.update_ui)
         worker.error.connect(lambda e: setattr(self, 'is_polling', False))
+        
+        # Auto-cleanup
+        worker.finished.connect(lambda r, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
+        worker.error.connect(lambda e, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
         
         self.active_workers.append(worker)
         worker.start()
@@ -256,6 +330,7 @@ ss -s | grep "TCP:" || true
             procs = p_s[0].strip().split('\n')
             sockets = p_s[1].strip() if len(p_s) > 1 else ""
             
+            # --- Graph Updates ---
             for line in metrics:
                 if not line or '|' not in line: continue
                 m = line.split('|')
@@ -283,7 +358,12 @@ ss -s | grep "TCP:" || true
                 self.rx_curve.setData(self.timestamps, self.rx_data)
                 self.tx_curve.setData(self.timestamps, self.tx_data)
                 
+            # --- Processes Table Update (Preserving Selection) ---
             if len(procs) > 1:
+                selected_pid = None
+                if self.proc_table.currentRow() >= 0:
+                    selected_pid = self.proc_table.item(self.proc_table.currentRow(), 0).text()
+                    
                 self.proc_table.setRowCount(0)
                 for i, line in enumerate(procs[1:]):
                     f = line.split()
@@ -291,7 +371,15 @@ ss -s | grep "TCP:" || true
                         self.proc_table.insertRow(i)
                         for col, val in enumerate([f[0], f[1], f[2], f[3], " ".join(f[4:])]):
                             self.proc_table.setItem(i, col, QTableWidgetItem(val))
+                        
+                        # Re-select the previously highlighted process
+                        if f[0] == selected_pid:
+                            self.proc_table.selectRow(i)
+                
+                # Re-apply the search filter instantly
+                self.filter_processes()
                             
+            # --- Network Sockets Update ---
             if sockets:
                 self.sockets_lbl.setText(f"Network Sockets:\n{sockets}")
                 
