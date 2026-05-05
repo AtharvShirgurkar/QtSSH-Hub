@@ -14,11 +14,13 @@ class GPUTab(QWidget):
         self.sec_mgr = sec_mgr
         self.db_mgr = db_mgr
         self.is_polling = False
+        self.last_fetched_ts = 0
         self.active_workers = []
+        self.static_gpu_info = {}
         
         self.gpu_history = {} 
         self.gpu_curves = {'util': {}, 'vram': {}, 'temp': {}, 'power': {}}
-        self.colors = ['#89b4fa', '#f38ba8', '#a6e3a1', '#f9e2af', '#cba6f7', '#fab387']
+        self.colors = ['#89b4fa', '#f38ba8', '#a6e3a1', '#f9e2af', '#cba6f7', '#fab387', '#89dceb', '#f5c2e7']
         self.current_gpu_procs = [] 
         
         layout = QVBoxLayout(self)
@@ -36,6 +38,11 @@ class GPUTab(QWidget):
         self.device_combo.currentIndexChanged.connect(self.reset_graphs)
         header.addWidget(self.device_combo)
         
+        self.btn_deploy = QPushButton("Deploy GPU Telemetry")
+        self.btn_deploy.setObjectName("PrimaryBtn")
+        self.btn_deploy.clicked.connect(self.deploy_agent)
+        header.addWidget(self.btn_deploy)
+        
         self.driver_lbl = QLabel("Driver: --- | CUDA: ---")
         self.driver_lbl.setStyleSheet("font-weight: bold; color: #f9e2af; padding-left: 15px;")
         header.addWidget(self.driver_lbl)
@@ -51,6 +58,7 @@ class GPUTab(QWidget):
         
         self.setup_overview_tab()
         self.setup_users_tab()
+        self.setup_historical_tab()
         self.setup_utilization_tab()
         self.setup_thermals_tab()
         self.setup_advanced_tab()
@@ -82,7 +90,6 @@ class GPUTab(QWidget):
         layout.addWidget(QLabel("Hardware Summary:"))
         layout.addWidget(self.general_metrics)
         
-        # --- Process Controls ---
         proc_controls = QHBoxLayout()
         self.proc_search = QLineEdit()
         self.proc_search.setPlaceholderText("Search GPU processes by PID, User, or Command...")
@@ -107,7 +114,7 @@ class GPUTab(QWidget):
         
         self.table = QTableWidget()
         self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["PID", "VRAM Used", "System User", "Full Command Line"])
+        self.table.setHorizontalHeaderLabels(["PID", "VRAM Used", "System User", "Command Executable"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
@@ -121,7 +128,6 @@ class GPUTab(QWidget):
         layout = QVBoxLayout(tab)
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left Panel: Users Table
         left_grp = QGroupBox("Active GPU Users")
         left_lay = QVBoxLayout(left_grp)
         self.user_table = QTableWidget()
@@ -134,7 +140,6 @@ class GPUTab(QWidget):
         left_lay.addWidget(self.user_table)
         splitter.addWidget(left_grp)
 
-        # Right Panel: User's Processes
         right_grp = QGroupBox("Selected User's Processes")
         right_lay = QVBoxLayout(right_grp)
         self.user_proc_table = QTableWidget()
@@ -146,7 +151,6 @@ class GPUTab(QWidget):
         self.user_proc_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         
         proc_btns = QHBoxLayout()
-        
         self.btn_user_proc_inspect = QPushButton("Inspect Details")
         self.btn_user_proc_inspect.setObjectName("PrimaryBtn")
         self.btn_user_proc_inspect.clicked.connect(self.inspect_user_process)
@@ -165,14 +169,49 @@ class GPUTab(QWidget):
 
         splitter.setSizes([450, 750])
         layout.addWidget(splitter)
-        self.viz_tabs.addTab(tab, "User Analysis")
+        self.viz_tabs.addTab(tab, "Live User Analysis")
+
+    def setup_historical_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        controls = QHBoxLayout()
+        self.hist_timeframe = QComboBox()
+        self.hist_timeframe.addItems(["Today", "This Week", "This Month", "All Time"])
+        self.btn_calc_hist = QPushButton("Fetch & Plot Data")
+        self.btn_calc_hist.setObjectName("PrimaryBtn")
+        self.btn_calc_hist.clicked.connect(self.calculate_historical)
+        
+        controls.addWidget(QLabel("Timeframe:"))
+        controls.addWidget(self.hist_timeframe)
+        controls.addWidget(self.btn_calc_hist)
+        controls.addStretch()
+        layout.addLayout(controls)
+        
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        
+        self.hist_table = QTableWidget()
+        self.hist_table.setColumnCount(4)
+        self.hist_table.setHorizontalHeaderLabels(["User", "Peak VRAM (MB)", "Avg VRAM (MB)", "Active Data Points"])
+        self.hist_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.hist_table.verticalHeader().setVisible(False)
+        self.hist_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        splitter.addWidget(self.hist_table)
+        
+        self.timeline_plot = pg.PlotWidget(axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
+        self.style_plot(self.timeline_plot, "User-Wise VRAM Usage Timeline (MB)")
+        splitter.addWidget(self.timeline_plot)
+        
+        splitter.setSizes([200, 500])
+        layout.addWidget(splitter)
+        
+        self.viz_tabs.addTab(tab, "Historical Usage & Timeline")
 
     def setup_utilization_tab(self):
         tab = QWidget()
         layout = QHBoxLayout(tab)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.util_plot = pg.PlotWidget(axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
-        
         self.style_plot(self.util_plot, "Compute Core Utilization (%)")
         self.util_plot.setYRange(0, 100)
         
@@ -205,7 +244,6 @@ class GPUTab(QWidget):
         grp_lay = QHBoxLayout(grp)
         
         self.btn_persist_on = QPushButton("Enable Persistence Mode")
-        self.btn_persist_on.setToolTip("Keeps NVIDIA driver loaded to prevent spin-up lag on Ubuntu servers")
         self.btn_persist_on.clicked.connect(lambda: self.run_driver_cmd("nvidia-smi -pm 1"))
         
         self.btn_persist_off = QPushButton("Disable Persistence Mode")
@@ -213,7 +251,6 @@ class GPUTab(QWidget):
         
         self.btn_reset_gpu = QPushButton("Soft Reset GPU (-r)")
         self.btn_reset_gpu.setObjectName("DangerBtn")
-        self.btn_reset_gpu.setToolTip("Attempt to reset GPU state (requires no active compute processes)")
         self.btn_reset_gpu.clicked.connect(lambda: self.run_driver_cmd("nvidia-smi -r"))
         
         self.btn_deep_query = QPushButton("Full Topology & Details Query")
@@ -247,13 +284,73 @@ class GPUTab(QWidget):
         self.gpu_history.clear()
         self.util_plot.clear(); self.vram_plot.clear()
         self.temp_plot.clear(); self.power_plot.clear()
+        if hasattr(self, 'timeline_plot'):
+            self.timeline_plot.clear()
         self.gpu_curves = {'util': {}, 'vram': {}, 'temp': {}, 'power': {}}
         self.general_metrics.clear()
+        self.last_fetched_ts = 0
         self.table.setRowCount(0)
         self.driver_lbl.setText("Driver: --- | CUDA: ---")
         if hasattr(self, 'user_table'):
             self.user_table.setRowCount(0)
             self.user_proc_table.setRowCount(0)
+
+    def deploy_agent(self):
+        dev = self.device_combo.currentData()
+        if not dev: return
+        self.btn_deploy.setEnabled(False)
+        self.status_lbl.setText("Deploying...")
+
+        bash_payload = r"""set -e
+cat << 'EOF' > /usr/local/bin/gpu_admin_agent.sh
+#!/bin/bash
+LOG="/var/log/gpu_admin_metrics.log"
+while true; do
+    TS=$(date +%s)
+    # Reduced GPU_STATS: Omitted static name & memory.total to save space
+    GPU_STATS=$(nvidia-smi --query-gpu=index,utilization.gpu,memory.used,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null | tr '\n' ';' | sed 's/;$//')
+
+    PRC_STATS=$(nvidia-smi | awk '/^\|.* [CG\+]+ .*MiB \|$/' | while read -r line; do
+        pid=$(echo "$line" | grep -oE "[0-9]+ +[CG\+]+" | awk '{print $1}')
+        vram=$(echo "$line" | grep -oE "[0-9]+ *MiB" | tr -d ' MiB')
+        if [ -n "$pid" ]; then
+            user=$(ps -o ruser= -p "$pid" | tr -d ' ' | tail -n 1)
+            # Use 'comm' instead of 'args' to save storage on massive executable strings
+            comm=$(ps -p "$pid" -o comm= 2>/dev/null | tail -n 1 || echo "Unknown")
+            safe_cmd=$(echo "$comm" | tr -d ';|,')
+            echo "${pid},${vram},${user},${safe_cmd}"
+        fi
+    done | tr '\n' ';' | sed 's/;$//')
+
+    echo "$TS|$GPU_STATS|$PRC_STATS" >> "$LOG"
+
+    lines=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+    if [ "$lines" -gt "500000" ]; then tail -n 400000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"; fi
+    sleep 4
+done
+EOF
+
+chmod +x /usr/local/bin/gpu_admin_agent.sh
+cat << 'EOF' > /etc/systemd/system/gpu_admin_agent.service
+[Unit]
+Description=QtSSH Hub GPU Telemetry
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/gpu_admin_agent.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
+"""
+        cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
+        worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
+        worker.finished.connect(lambda r: self.btn_deploy.setEnabled(True))
+        self.active_workers.append(worker)
+        worker.start()
 
     def run_driver_cmd(self, cmd):
         dev = self.device_combo.currentData()
@@ -384,7 +481,6 @@ class GPUTab(QWidget):
         
         selected_user = self.user_table.item(rows[0].row(), 0).text()
         
-        # Preserve selection
         selected_pid = None
         if self.user_proc_table.currentRow() >= 0:
             selected_pid = self.user_proc_table.item(self.user_proc_table.currentRow(), 0).text()
@@ -402,32 +498,159 @@ class GPUTab(QWidget):
                     self.user_proc_table.selectRow(row_idx)
                 row_idx += 1
 
+    def calculate_historical(self):
+        dev = self.device_combo.currentData()
+        if not dev: return
+        self.btn_calc_hist.setEnabled(False)
+        self.btn_calc_hist.setText("Calculating...")
+        
+        tf = self.hist_timeframe.currentText()
+        if tf == "Today": date_str = "today 00:00:00"
+        elif tf == "This Week": date_str = "last sunday 00:00:00" 
+        elif tf == "This Month": date_str = "1 month ago"
+        else: date_str = "1970-01-01"
+
+        bash_payload = f"""
+        START_TS=$(date -d '{date_str}' +%s 2>/dev/null || echo 0)
+        awk -F'|' -v start="$START_TS" '
+        $1 >= start {{
+            ts = $1
+            split($3, procs, ";")
+            delete current_vram
+            for (i in procs) {{
+                if (procs[i] == "") continue
+                split(procs[i], p_info, ",")
+                vram = p_info[2] + 0
+                user = p_info[3]
+                if (user != "") {{
+                    current_vram[user] += vram
+                }}
+            }}
+            
+            # Buckets of 1 minute to avoid massive graph data
+            bucket = int(ts / 60) * 60
+            for (u in current_vram) {{
+                if (current_vram[u] > bucket_max[bucket SUBSEP u]) {{
+                    bucket_max[bucket SUBSEP u] = current_vram[u]
+                }}
+                
+                # Summary Stats Tracker
+                if (!seen[ts SUBSEP u]) {{
+                    user_total_vram[u] += current_vram[u]
+                    user_samples[u]++
+                    if (current_vram[u] > user_peak[u]) {{ user_peak[u] = current_vram[u] }}
+                    seen[ts SUBSEP u] = 1
+                }}
+            }}
+        }}
+        END {{
+            print "===SUMMARY==="
+            for (u in user_samples) {{
+                avg = user_total_vram[u] / user_samples[u]
+                printf "%s|%d|%d|%d\\n", u, user_peak[u], avg, user_samples[u]
+            }}
+            print "===TIMESERIES==="
+            for (b_u in bucket_max) {{
+                split(b_u, arr, SUBSEP)
+                printf "%s|%s|%d\\n", arr[1], arr[2], bucket_max[b_u]
+            }}
+        }}' /var/log/gpu_admin_metrics.log || echo "ERROR"
+        """
+        cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
+        worker = SSHWorker(dev, cmd, self.sec_mgr)
+        worker.finished.connect(self.populate_historical)
+        self.active_workers.append(worker)
+        worker.start()
+
+    def populate_historical(self, result):
+        self.btn_calc_hist.setEnabled(True)
+        self.btn_calc_hist.setText("Fetch & Plot Data")
+        self.hist_table.setRowCount(0)
+        self.timeline_plot.clear()
+        
+        if result['code'] == 0 and "ERROR" not in result['stdout']:
+            parts = result['stdout'].split('===SUMMARY===')
+            if len(parts) > 1:
+                sub_parts = parts[1].split('===TIMESERIES===')
+                summary_lines = sub_parts[0].strip().split('\n')
+                timeseries_lines = sub_parts[1].strip().split('\n') if len(sub_parts) > 1 else []
+                
+                row = 0
+                for line in summary_lines:
+                    if not line: continue
+                    fields = line.split('|')
+                    if len(fields) == 4:
+                        self.hist_table.insertRow(row)
+                        self.hist_table.setItem(row, 0, QTableWidgetItem(fields[0]))
+                        self.hist_table.setItem(row, 1, QTableWidgetItem(fields[1]))
+                        self.hist_table.setItem(row, 2, QTableWidgetItem(fields[2]))
+                        self.hist_table.setItem(row, 3, QTableWidgetItem(fields[3]))
+                        row += 1
+
+                user_ts_data = {}
+                for line in timeseries_lines:
+                    if not line: continue
+                    ts_str, user, vram_str = line.split('|')
+                    try:
+                        ts = int(ts_str)
+                        vram = int(vram_str)
+                        if user not in user_ts_data:
+                            user_ts_data[user] = {'ts': [], 'vram': []}
+                        user_ts_data[user]['ts'].append(ts)
+                        user_ts_data[user]['vram'].append(vram)
+                    except: pass
+                
+                # Plot User Timeline with Zero Padding for Gaps > 2 Mins (Displays clear slots)
+                for i, (user, data) in enumerate(user_ts_data.items()):
+                    sorted_pairs = sorted(zip(data['ts'], data['vram']))
+                    ts_sorted = []
+                    vram_sorted = []
+                    last_ts = None
+                    
+                    for ts, vram in sorted_pairs:
+                        if last_ts is not None and (ts - last_ts) > 120:
+                            # Drop to zero in graph when user stopped using
+                            ts_sorted.append(last_ts + 60)
+                            vram_sorted.append(0)
+                            ts_sorted.append(ts - 60)
+                            vram_sorted.append(0)
+                            
+                        ts_sorted.append(ts)
+                        vram_sorted.append(vram)
+                        last_ts = ts
+                        
+                    # Drop to zero at end to close graph
+                    if last_ts is not None:
+                        ts_sorted.append(last_ts + 60)
+                        vram_sorted.append(0)
+                        
+                    c = self.colors[i % len(self.colors)]
+                    self.timeline_plot.plot(ts_sorted, vram_sorted, 
+                                            pen=pg.mkPen(c, width=2), 
+                                            fillLevel=0, 
+                                            brush=pg.mkBrush(c+'60'), 
+                                            name=user)
+
     def poll_metrics(self):
         dev = self.device_combo.currentData()
         if not dev or self.is_polling: return
         self.is_polling = True
         
-        bash_payload = r"""
+        bash_payload = f"""
         export PATH=$PATH:/usr/bin:/bin:/usr/local/bin:/sbin:/usr/sbin
+        if [ ! -f /var/log/gpu_admin_metrics.log ]; then echo "MISSING"; exit 0; fi
+        
         echo "===SYS==="
         smi_out=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1)
-        nvcc_out=$(nvcc --version 2>/dev/null | grep release | awk '{print $5}' | cut -d',' -f1)
-        if [ -z "$nvcc_out" ]; then nvcc_out=$(nvidia-smi | grep "CUDA Version" | awk '{print $9}'); fi
-        echo "Driver: ${smi_out:-Unknown} | CUDA: ${nvcc_out:-Unknown}"
+        nvcc_out=$(nvcc --version 2>/dev/null | grep release | awk '{{print $5}}' | cut -d',' -f1)
+        if [ -z "$nvcc_out" ]; then nvcc_out=$(nvidia-smi | grep "CUDA Version" | awk '{{print $9}}'); fi
+        echo "Driver: ${{smi_out:-Unknown}} | CUDA: ${{nvcc_out:-Unknown}}"
         
-        echo "===GPU==="
-        nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null
+        echo "===STATIC==="
+        nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader,nounits 2>/dev/null
         
-        echo "===PRC==="
-        nvidia-smi | awk '/^\|.* [CG\+]+ .*MiB \|$/' | while read -r line; do
-            pid=$(echo "$line" | grep -oE "[0-9]+ +[CG\+]+" | awk '{print $1}')
-            vram=$(echo "$line" | grep -oE "[0-9]+ *MiB" | tr -d ' ')
-            if [ -n "$pid" ]; then
-                user=$(ps -o ruser= -p "$pid" | tr -d ' ' | tail -n 1)
-                full_cmd=$(ps -p "$pid" -o args= 2>/dev/null | tail -n 1 || echo "Unknown/Exited")
-                echo "$pid|$vram|$user|$full_cmd"
-            fi
-        done
+        echo "DATA"
+        awk -F'|' -v ts="{self.last_fetched_ts}" '($1+0) > (ts+0)' /var/log/gpu_admin_metrics.log || true
         """
         cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
         
@@ -444,119 +667,148 @@ class GPUTab(QWidget):
     def update_ui(self, result):
         self.is_polling = False
         if result['code'] != 0:
-            self.status_lbl.setText("No Drivers / Error")
+            return
+            
+        stdout = result.get('stdout', '')
+        if "MISSING" in stdout:
+            self.status_lbl.setText("Agent Not Running")
             self.status_lbl.setStyleSheet("color: #f38ba8; padding: 5px; background: #313244; border-radius: 5px;")
             return
             
         self.status_lbl.setText("Connected & Live")
         self.status_lbl.setStyleSheet("color: #a6e3a1; padding: 5px; background: #313244; border-radius: 5px;")
         
-        stdout = result.get('stdout', '')
-        
         try:
-            parts = stdout.split('===')
-            data_blocks = {}
-            for i in range(1, len(parts), 2):
-                if i+1 < len(parts):
-                    key = parts[i].strip()
-                    data_blocks[key] = parts[i+1].strip()
+            if "===SYS===" in stdout:
+                sys_parts = stdout.split("===SYS===")[1].split("===STATIC===")
+                self.driver_lbl.setText(sys_parts[0].strip())
+                
+                static_parts = sys_parts[1].split("DATA\n")
+                static_lines = static_parts[0].strip().split('\n')
+                data_lines = static_parts[1].strip().split('\n') if len(static_parts) > 1 else []
+                
+                for line in static_lines:
+                    if not line: continue
+                    fields = [x.strip() for x in line.split(',')]
+                    if len(fields) >= 3:
+                        try:
+                            idx = int(fields[0])
+                            self.static_gpu_info[idx] = {'name': fields[1], 'total': fields[2]}
+                        except: pass
+            else:
+                return
+
+            latest_gpu_str = ""
+            latest_procs_str = ""
             
-            if 'SYS' in data_blocks:
-                self.driver_lbl.setText(data_blocks['SYS'])
+            for line in data_lines:
+                if not line or '|' not in line: continue
+                fields = line.split('|')
+                if len(fields) < 2: continue
+                
+                ts = int(fields[0])
+                self.last_fetched_ts = ts
+                
+                latest_gpu_str = fields[1]
+                latest_procs_str = fields[2] if len(fields) >= 3 else ""
+                
+                gpus = latest_gpu_str.split(';')
+                for g in gpus:
+                    if not g: continue
+                    f = [x.strip() for x in g.split(',')]
+                    if len(f) >= 5:
+                        try: idx = int(f[0])
+                        except ValueError: continue
+                        
+                        try: util = float(f[1])
+                        except ValueError: util = 0.0
+                        try: v_used = float(f[2])
+                        except ValueError: v_used = 0.0
+                        try: temp = float(f[3])
+                        except ValueError: temp = 0.0
+                        try: pwr = float(f[4])
+                        except ValueError: pwr = 0.0
+                        
+                        if idx not in self.gpu_history:
+                            self.gpu_history[idx] = {'ts': [], 'util': [], 'vram': [], 'temp': [], 'power': []}
+                            c = self.colors[idx % len(self.colors)]
+                            self.gpu_curves['util'][idx] = self.util_plot.plot(pen=pg.mkPen(c, width=2), name=f"GPU {idx}")
+                            self.gpu_curves['vram'][idx] = self.vram_plot.plot(pen=pg.mkPen(c, width=2), name=f"GPU {idx}")
+                            self.gpu_curves['temp'][idx] = self.temp_plot.plot(pen=pg.mkPen(c, width=2), name=f"GPU {idx}")
+                            self.gpu_curves['power'][idx] = self.power_plot.plot(pen=pg.mkPen(c, width=2), name=f"GPU {idx}")
+                            
+                        self.gpu_history[idx]['ts'].append(ts)
+                        self.gpu_history[idx]['util'].append(util)
+                        self.gpu_history[idx]['vram'].append(v_used)
+                        self.gpu_history[idx]['temp'].append(temp)
+                        self.gpu_history[idx]['power'].append(pwr)
+                        
+                        for k in ['ts', 'util', 'vram', 'temp', 'power']:
+                            if len(self.gpu_history[idx][k]) > 50: self.gpu_history[idx][k].pop(0)
+                                
+                        self.gpu_curves['util'][idx].setData(self.gpu_history[idx]['ts'], self.gpu_history[idx]['util'])
+                        self.gpu_curves['vram'][idx].setData(self.gpu_history[idx]['ts'], self.gpu_history[idx]['vram'])
+                        self.gpu_curves['temp'][idx].setData(self.gpu_history[idx]['ts'], self.gpu_history[idx]['temp'])
+                        self.gpu_curves['power'][idx].setData(self.gpu_history[idx]['ts'], self.gpu_history[idx]['power'])
             
-            stats = data_blocks.get('GPU', '')
-            procs = data_blocks.get('PRC', '')
-            
-            now = time.time()
+            if not latest_gpu_str:
+                return
+
             overview = ""
-            for line in stats.split('\n'):
-                if not line.strip(): continue
-                f = [x.strip() for x in line.split(',')]
-                if len(f) >= 7:
+            for g in latest_gpu_str.split(';'):
+                if not g: continue
+                f = [x.strip() for x in g.split(',')]
+                if len(f) >= 5:
                     try: idx = int(f[0])
                     except ValueError: continue
-                    
-                    name = f[1]
-                    try: util = float(f[2])
-                    except ValueError: util = 0.0
-                    try: v_used = float(f[3])
-                    except ValueError: v_used = 0.0
-                    try: v_tot = float(f[4])
-                    except ValueError: v_tot = 0.0
-                    try: temp = float(f[5])
-                    except ValueError: temp = 0.0
-                    try: pwr = float(f[6])
-                    except ValueError: pwr = 0.0
-                    
+                    util, v_used, temp, pwr = f[1], f[2], f[3], f[4]
+                    static = self.static_gpu_info.get(idx, {'name': 'Unknown', 'total': '0'})
+                    name = static['name']
+                    v_tot = static['total']
                     overview += f"[{idx}] {name} | Compute: {util}% | VRAM: {v_used}/{v_tot}MB | Temp: {temp}C | Pwr: {pwr}W\n"
-                    
-                    if idx not in self.gpu_history:
-                        self.gpu_history[idx] = {'ts': [], 'util': [], 'vram': [], 'temp': [], 'power': []}
-                        c = self.colors[idx % len(self.colors)]
-                        self.gpu_curves['util'][idx] = self.util_plot.plot(pen=pg.mkPen(c, width=2), name=f"GPU {idx}")
-                        self.gpu_curves['vram'][idx] = self.vram_plot.plot(pen=pg.mkPen(c, width=2), name=f"GPU {idx}")
-                        self.gpu_curves['temp'][idx] = self.temp_plot.plot(pen=pg.mkPen(c, width=2), name=f"GPU {idx}")
-                        self.gpu_curves['power'][idx] = self.power_plot.plot(pen=pg.mkPen(c, width=2), name=f"GPU {idx}")
-                        
-                    self.gpu_history[idx]['ts'].append(now)
-                    self.gpu_history[idx]['util'].append(util)
-                    self.gpu_history[idx]['vram'].append(v_used)
-                    self.gpu_history[idx]['temp'].append(temp)
-                    self.gpu_history[idx]['power'].append(pwr)
-                    
-                    for k in ['ts', 'util', 'vram', 'temp', 'power']:
-                        if len(self.gpu_history[idx][k]) > 50: self.gpu_history[idx][k].pop(0)
-                            
-                    self.gpu_curves['util'][idx].setData(self.gpu_history[idx]['ts'], self.gpu_history[idx]['util'])
-                    self.gpu_curves['vram'][idx].setData(self.gpu_history[idx]['ts'], self.gpu_history[idx]['vram'])
-                    self.gpu_curves['temp'][idx].setData(self.gpu_history[idx]['ts'], self.gpu_history[idx]['temp'])
-                    self.gpu_curves['power'][idx].setData(self.gpu_history[idx]['ts'], self.gpu_history[idx]['power'])
-                    
             self.general_metrics.setText(overview)
             
-            # --- Update Processes & User Analysis ---
             selected_pid = None
             if self.table.currentRow() >= 0:
                 selected_pid = self.table.item(self.table.currentRow(), 0).text()
                 
             self.table.setRowCount(0)
-            proc_lines = [p for p in procs.split('\n') if p.strip()]
+            proc_lines = latest_procs_str.split(';')
             
             user_stats = {} 
             self.current_gpu_procs = []
             
-            for i, p in enumerate(proc_lines):
-                f = p.split('|', 3) 
+            row_i = 0
+            for p in proc_lines:
+                if not p: continue
+                f = p.split(',') 
                 if len(f) >= 4:
-                    pid, vram_str, user, cmd = f[0].strip(), f[1].strip(), f[2].strip(), f[3].strip()
+                    pid, vram_val, user, cmd = f[0].strip(), f[1].strip(), f[2].strip(), f[3].strip()
+                    vram_str = f"{vram_val} MiB"
                     
-                    # 1. Update standard overview table
-                    self.table.insertRow(i)
-                    self.table.setItem(i, 0, QTableWidgetItem(pid))
-                    self.table.setItem(i, 1, QTableWidgetItem(vram_str))
-                    self.table.setItem(i, 2, QTableWidgetItem(user))
-                    self.table.setItem(i, 3, QTableWidgetItem(cmd))
+                    self.table.insertRow(row_i)
+                    self.table.setItem(row_i, 0, QTableWidgetItem(pid))
+                    self.table.setItem(row_i, 1, QTableWidgetItem(vram_str))
+                    self.table.setItem(row_i, 2, QTableWidgetItem(user))
+                    self.table.setItem(row_i, 3, QTableWidgetItem(cmd))
                     
                     if pid == selected_pid:
-                        self.table.selectRow(i)
+                        self.table.selectRow(row_i)
+                    row_i += 1
                         
-                    # 2. Aggregate Data for User Analysis Tab
-                    vram_val = 0
-                    try:
-                        vram_val = int(vram_str.replace('MiB', '').strip())
-                    except:
-                        pass
+                    v = 0
+                    try: v = int(vram_val)
+                    except ValueError: pass
                         
                     if user not in user_stats:
                         user_stats[user] = {'vram': 0, 'count': 0}
-                    user_stats[user]['vram'] += vram_val
+                    user_stats[user]['vram'] += v
                     user_stats[user]['count'] += 1
                     
                     self.current_gpu_procs.append({'pid': pid, 'vram': vram_str, 'user': user, 'cmd': cmd})
             
             self.filter_processes()
             
-            # 3. Update the Users Table in the new tab
             if hasattr(self, 'user_table'):
                 selected_user = None
                 if self.user_table.currentRow() >= 0:
@@ -564,7 +816,6 @@ class GPUTab(QWidget):
                     
                 self.user_table.setRowCount(0)
                 row_idx = 0
-                # Sort users by total VRAM used
                 for user, stats in sorted(user_stats.items(), key=lambda item: item[1]['vram'], reverse=True):
                     self.user_table.insertRow(row_idx)
                     self.user_table.setItem(row_idx, 0, QTableWidgetItem(user))
