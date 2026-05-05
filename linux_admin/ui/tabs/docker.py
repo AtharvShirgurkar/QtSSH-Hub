@@ -167,6 +167,10 @@ class DockerTab(QWidget):
         splitter.setSizes([600, 200])
         self.refresh_devices()
 
+    def _cleanup_worker(self, worker):
+        if worker in self.active_workers:
+            self.active_workers.remove(worker)
+
     def refresh_devices(self):
         self.device_combo.blockSignals(True)
         self.device_combo.clear()
@@ -176,7 +180,8 @@ class DockerTab(QWidget):
         self.device_combo.blockSignals(False)
 
     def log(self, text):
-        self.log_out.setText(text)
+        # FIX: Ensure PyQt treats log output as raw text, preventing HTML-like '<' '>' parsing bugs 
+        self.log_out.setPlainText(text)
 
     # --- Unified Data Fetcher ---
     def fetch_all(self):
@@ -201,6 +206,7 @@ class DockerTab(QWidget):
         
         worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
         worker.finished.connect(self.populate_all)
+        worker.finished.connect(lambda r, w=worker: self._cleanup_worker(w))
         self.active_workers.append(worker)
         worker.start()
 
@@ -285,7 +291,8 @@ class DockerTab(QWidget):
         self.log(f"Executing: {cmd}...")
         
         worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
-        worker.finished.connect(lambda r: self.log(r['stdout'] + r['stderr']) or self.fetch_all())
+        worker.finished.connect(lambda r: self.log(r['stdout'] + "\n" + r['stderr']) or self.fetch_all())
+        worker.finished.connect(lambda r, w=worker: self._cleanup_worker(w))
         self.active_workers.append(worker)
         worker.start()
 
@@ -299,6 +306,7 @@ class DockerTab(QWidget):
         cmd = f"docker logs --tail 100 {cid}"
         worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
         worker.finished.connect(lambda r: self.log(r['stdout'] + "\n" + r['stderr']))
+        worker.finished.connect(lambda r, w=worker: self._cleanup_worker(w))
         self.active_workers.append(worker)
         worker.start()
 
@@ -311,7 +319,8 @@ class DockerTab(QWidget):
         self.log(f"Fetching instant stats for {cid}...")
         cmd = f"docker stats --no-stream {cid}"
         worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
-        worker.finished.connect(lambda r: self.log(r['stdout'] + r['stderr']))
+        worker.finished.connect(lambda r: self.log(r['stdout'] + "\n" + r['stderr']))
+        worker.finished.connect(lambda r, w=worker: self._cleanup_worker(w))
         self.active_workers.append(worker)
         worker.start()
 
@@ -328,7 +337,8 @@ class DockerTab(QWidget):
             cmd = f"docker exec {cid} {cmd_text}"
             self.log(f"Running '{cmd_text}' in {cname}...")
             worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
-            worker.finished.connect(lambda r: self.log(f"Output of '{cmd_text}':\n\n" + r['stdout'] + r['stderr']))
+            worker.finished.connect(lambda r: self.log(f"Output of '{cmd_text}':\n\n" + r['stdout'] + "\n" + r['stderr']))
+            worker.finished.connect(lambda r, w=worker: self._cleanup_worker(w))
             self.active_workers.append(worker)
             worker.start()
 
@@ -341,7 +351,8 @@ class DockerTab(QWidget):
             cmd = f"docker pull {img_name}"
             self.log(f"Pulling image {img_name}... This might take a while.")
             worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
-            worker.finished.connect(lambda r: self.log(r['stdout'] + r['stderr']) or self.fetch_all())
+            worker.finished.connect(lambda r: self.log(r['stdout'] + "\n" + r['stderr']) or self.fetch_all())
+            worker.finished.connect(lambda r, w=worker: self._cleanup_worker(w))
             self.active_workers.append(worker)
             worker.start()
 
@@ -357,6 +368,7 @@ class DockerTab(QWidget):
             self.log("Running Docker System Prune...")
             cmd = "docker system prune -af"
             worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
-            worker.finished.connect(lambda r: self.log(r['stdout'] + r['stderr']) or self.fetch_all())
+            worker.finished.connect(lambda r: self.log(r['stdout'] + "\n" + r['stderr']) or self.fetch_all())
+            worker.finished.connect(lambda r, w=worker: self._cleanup_worker(w))
             self.active_workers.append(worker)
             worker.start()

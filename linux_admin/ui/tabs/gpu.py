@@ -19,6 +19,7 @@ class GPUTab(QWidget):
         self.gpu_history = {} 
         self.gpu_curves = {'util': {}, 'vram': {}, 'temp': {}, 'power': {}}
         self.colors = ['#89b4fa', '#f38ba8', '#a6e3a1', '#f9e2af', '#cba6f7', '#fab387']
+        self.current_gpu_procs = [] 
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -49,6 +50,7 @@ class GPUTab(QWidget):
         layout.addWidget(self.viz_tabs)
         
         self.setup_overview_tab()
+        self.setup_users_tab()
         self.setup_utilization_tab()
         self.setup_thermals_tab()
         self.setup_advanced_tab()
@@ -114,13 +116,63 @@ class GPUTab(QWidget):
         
         self.viz_tabs.addTab(tab, "Overview & Processes")
 
+    def setup_users_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # Left Panel: Users Table
+        left_grp = QGroupBox("Active GPU Users")
+        left_lay = QVBoxLayout(left_grp)
+        self.user_table = QTableWidget()
+        self.user_table.setColumnCount(3)
+        self.user_table.setHorizontalHeaderLabels(["User", "Total VRAM", "Process Count"])
+        self.user_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.user_table.verticalHeader().setVisible(False)
+        self.user_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.user_table.itemSelectionChanged.connect(self.on_gpu_user_selected)
+        left_lay.addWidget(self.user_table)
+        splitter.addWidget(left_grp)
+
+        # Right Panel: User's Processes
+        right_grp = QGroupBox("Selected User's Processes")
+        right_lay = QVBoxLayout(right_grp)
+        self.user_proc_table = QTableWidget()
+        self.user_proc_table.setColumnCount(3)
+        self.user_proc_table.setHorizontalHeaderLabels(["PID", "VRAM Used", "Command"])
+        self.user_proc_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.user_proc_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.user_proc_table.verticalHeader().setVisible(False)
+        self.user_proc_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        
+        proc_btns = QHBoxLayout()
+        
+        self.btn_user_proc_inspect = QPushButton("Inspect Details")
+        self.btn_user_proc_inspect.setObjectName("PrimaryBtn")
+        self.btn_user_proc_inspect.clicked.connect(self.inspect_user_process)
+        
+        self.btn_user_proc_kill = QPushButton("Force Kill Selected Process")
+        self.btn_user_proc_kill.setObjectName("DangerBtn")
+        self.btn_user_proc_kill.clicked.connect(self.kill_user_process)
+        
+        proc_btns.addWidget(self.btn_user_proc_inspect)
+        proc_btns.addWidget(self.btn_user_proc_kill)
+        proc_btns.addStretch()
+        
+        right_lay.addWidget(self.user_proc_table)
+        right_lay.addLayout(proc_btns)
+        splitter.addWidget(right_grp)
+
+        splitter.setSizes([450, 750])
+        layout.addWidget(splitter)
+        self.viz_tabs.addTab(tab, "User Analysis")
+
     def setup_utilization_tab(self):
         tab = QWidget()
         layout = QHBoxLayout(tab)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.util_plot = pg.PlotWidget(axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
         
-        # Clarified the label so users know it's Compute Cores, not Memory Allocation
         self.style_plot(self.util_plot, "Compute Core Utilization (%)")
         self.util_plot.setYRange(0, 100)
         
@@ -186,7 +238,6 @@ class GPUTab(QWidget):
         self.device_combo.blockSignals(True)
         self.device_combo.clear()
         for dev in self.db_mgr.get_devices():
-            # Only show if reachable AND specifically flagged as having a GPU
             if self.db_mgr.device_status.get(dev['id']) == "Reachable" and dev.get('has_gpu', 0) == 1:
                 self.device_combo.addItem(f"{dev['name']} ({dev['ip']})", dev)
         self.device_combo.blockSignals(False)
@@ -200,6 +251,9 @@ class GPUTab(QWidget):
         self.general_metrics.clear()
         self.table.setRowCount(0)
         self.driver_lbl.setText("Driver: --- | CUDA: ---")
+        if hasattr(self, 'user_table'):
+            self.user_table.setRowCount(0)
+            self.user_proc_table.setRowCount(0)
 
     def run_driver_cmd(self, cmd):
         dev = self.device_combo.currentData()
@@ -279,12 +333,80 @@ class GPUTab(QWidget):
         lay.addWidget(btn)
         dlg.exec()
 
+    def inspect_user_process(self):
+        dev = self.device_combo.currentData()
+        row = self.user_proc_table.currentRow()
+        if not dev or row < 0: 
+            QMessageBox.warning(self, "No Selection", "Please select a process from the user's process list.")
+            return
+        
+        pid = self.user_proc_table.item(row, 0).text()
+        
+        self.status_lbl.setText("Inspecting PID...")
+        bash_payload = f"""
+        echo "=== GPU Process Details for PID {pid} ==="
+        ps -p {pid} -o user,pid,ppid,state,pcpu,pmem,start,etime,args || echo "Process exited"
+        echo -e "\\n=== Environment Variables (CUDA/GPU specific) ==="
+        cat /proc/{pid}/environ 2>/dev/null | tr '\\0' '\\n' | grep -i -E 'CUDA|NVIDIA|GPU' || echo "None found or Access Denied"
+        echo -e "\\n=== Active File Descriptors & Sockets ==="
+        ls -l /proc/{pid}/fd 2>/dev/null | head -n 30 || echo "Access Denied"
+        """
+        b64_cmd = base64.b64encode(bash_payload.encode()).decode()
+        cmd = f"bash -c 'echo {b64_cmd} | base64 -d | bash'"
+        
+        worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
+        worker.finished.connect(self.show_inspect_dialog)
+        self.active_workers.append(worker)
+        worker.start()
+
+    def kill_user_process(self):
+        dev = self.device_combo.currentData()
+        row = self.user_proc_table.currentRow()
+        if not dev or row < 0: 
+            QMessageBox.warning(self, "No Selection", "Please select a process from the user's process list.")
+            return
+        
+        pid = self.user_proc_table.item(row, 0).text()
+        vram = self.user_proc_table.item(row, 1).text()
+        
+        if QMessageBox.question(self, "Confirm Kill", f"Force KILL PID {pid}? This will instantly free {vram}.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            cmd = f"kill -9 {pid}"
+            worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
+            worker.finished.connect(lambda r: self.status_lbl.setText(f"User Proc Action: {'Success' if r['code'] == 0 else 'Failed'}"))
+            self.active_workers.append(worker)
+            worker.start()
+
+    def on_gpu_user_selected(self):
+        rows = self.user_table.selectedItems()
+        if not rows:
+            self.user_proc_table.setRowCount(0)
+            return
+        
+        selected_user = self.user_table.item(rows[0].row(), 0).text()
+        
+        # Preserve selection
+        selected_pid = None
+        if self.user_proc_table.currentRow() >= 0:
+            selected_pid = self.user_proc_table.item(self.user_proc_table.currentRow(), 0).text()
+
+        self.user_proc_table.setRowCount(0)
+        row_idx = 0
+        for p in getattr(self, 'current_gpu_procs', []):
+            if p['user'] == selected_user:
+                self.user_proc_table.insertRow(row_idx)
+                self.user_proc_table.setItem(row_idx, 0, QTableWidgetItem(p['pid']))
+                self.user_proc_table.setItem(row_idx, 1, QTableWidgetItem(p['vram']))
+                self.user_proc_table.setItem(row_idx, 2, QTableWidgetItem(p['cmd']))
+                
+                if p['pid'] == selected_pid:
+                    self.user_proc_table.selectRow(row_idx)
+                row_idx += 1
+
     def poll_metrics(self):
         dev = self.device_combo.currentData()
         if not dev or self.is_polling: return
         self.is_polling = True
         
-        # Deep inspection script: Safely parses ALL GPU processes directly from nvidia-smi table
         bash_payload = r"""
         export PATH=$PATH:/usr/bin:/bin:/usr/local/bin:/sbin:/usr/sbin
         echo "===SYS==="
@@ -297,7 +419,6 @@ class GPUTab(QWidget):
         nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null
         
         echo "===PRC==="
-        # Robustly grabs PIDs and VRAM for BOTH Graphics (G) and Compute (C) apps
         nvidia-smi | awk '/^\|.* [CG\+]+ .*MiB \|$/' | while read -r line; do
             pid=$(echo "$line" | grep -oE "[0-9]+ +[CG\+]+" | awk '{print $1}')
             vram=$(echo "$line" | grep -oE "[0-9]+ *MiB" | tr -d ' ')
@@ -314,7 +435,6 @@ class GPUTab(QWidget):
         worker.finished.connect(self.update_ui)
         worker.error.connect(lambda e: setattr(self, 'is_polling', False))
         
-        # Auto-cleanup
         worker.finished.connect(lambda r, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
         worker.error.connect(lambda e, w=worker: self.active_workers.remove(w) if w in self.active_workers else None)
         
@@ -357,23 +477,17 @@ class GPUTab(QWidget):
                     except ValueError: continue
                     
                     name = f[1]
-                    
                     try: util = float(f[2])
                     except ValueError: util = 0.0
-                    
                     try: v_used = float(f[3])
                     except ValueError: v_used = 0.0
-                    
                     try: v_tot = float(f[4])
                     except ValueError: v_tot = 0.0
-                    
                     try: temp = float(f[5])
                     except ValueError: temp = 0.0
-                    
                     try: pwr = float(f[6])
                     except ValueError: pwr = 0.0
                     
-                    # Explicitly state 'Compute' in the text summary to match the updated graph label
                     overview += f"[{idx}] {name} | Compute: {util}% | VRAM: {v_used}/{v_tot}MB | Temp: {temp}C | Pwr: {pwr}W\n"
                     
                     if idx not in self.gpu_history:
@@ -400,24 +514,68 @@ class GPUTab(QWidget):
                     
             self.general_metrics.setText(overview)
             
-            # Update Processes Table (Preserving Selection)
+            # --- Update Processes & User Analysis ---
             selected_pid = None
             if self.table.currentRow() >= 0:
                 selected_pid = self.table.item(self.table.currentRow(), 0).text()
                 
             self.table.setRowCount(0)
             proc_lines = [p for p in procs.split('\n') if p.strip()]
-            for i, p in enumerate(proc_lines):
-                f = p.split('|', 3) # Split only on first 3 pipes to preserve commands that contain pipes
-                if len(f) >= 4:
-                    self.table.insertRow(i)
-                    for col in range(4): self.table.setItem(i, col, QTableWidgetItem(f[col].strip()))
-                    
-                    if f[0].strip() == selected_pid:
-                        self.table.selectRow(i)
             
-            # Re-apply the search filter
+            user_stats = {} 
+            self.current_gpu_procs = []
+            
+            for i, p in enumerate(proc_lines):
+                f = p.split('|', 3) 
+                if len(f) >= 4:
+                    pid, vram_str, user, cmd = f[0].strip(), f[1].strip(), f[2].strip(), f[3].strip()
+                    
+                    # 1. Update standard overview table
+                    self.table.insertRow(i)
+                    self.table.setItem(i, 0, QTableWidgetItem(pid))
+                    self.table.setItem(i, 1, QTableWidgetItem(vram_str))
+                    self.table.setItem(i, 2, QTableWidgetItem(user))
+                    self.table.setItem(i, 3, QTableWidgetItem(cmd))
+                    
+                    if pid == selected_pid:
+                        self.table.selectRow(i)
+                        
+                    # 2. Aggregate Data for User Analysis Tab
+                    vram_val = 0
+                    try:
+                        vram_val = int(vram_str.replace('MiB', '').strip())
+                    except:
+                        pass
+                        
+                    if user not in user_stats:
+                        user_stats[user] = {'vram': 0, 'count': 0}
+                    user_stats[user]['vram'] += vram_val
+                    user_stats[user]['count'] += 1
+                    
+                    self.current_gpu_procs.append({'pid': pid, 'vram': vram_str, 'user': user, 'cmd': cmd})
+            
             self.filter_processes()
+            
+            # 3. Update the Users Table in the new tab
+            if hasattr(self, 'user_table'):
+                selected_user = None
+                if self.user_table.currentRow() >= 0:
+                    selected_user = self.user_table.item(self.user_table.currentRow(), 0).text()
+                    
+                self.user_table.setRowCount(0)
+                row_idx = 0
+                # Sort users by total VRAM used
+                for user, stats in sorted(user_stats.items(), key=lambda item: item[1]['vram'], reverse=True):
+                    self.user_table.insertRow(row_idx)
+                    self.user_table.setItem(row_idx, 0, QTableWidgetItem(user))
+                    self.user_table.setItem(row_idx, 1, QTableWidgetItem(f"{stats['vram']} MiB"))
+                    self.user_table.setItem(row_idx, 2, QTableWidgetItem(str(stats['count'])))
+                    
+                    if user == selected_user:
+                        self.user_table.selectRow(row_idx)
+                    row_idx += 1
+                    
+                self.on_gpu_user_selected()
                 
         except Exception as e:
             print(f"Error parsing GPU data: {e}")
