@@ -1,11 +1,13 @@
 import base64
 import time
+import datetime
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, 
                              QLabel, QTableWidget, QTableWidgetItem, QHeaderView, 
                              QTextEdit, QTabWidget, QSplitter, QPushButton, 
-                             QMessageBox, QLineEdit, QDialog, QGroupBox)
-from PyQt6.QtCore import QTimer, Qt
+                             QMessageBox, QLineEdit, QDialog, QGroupBox, 
+                             QDateEdit, QFileDialog)
+from PyQt6.QtCore import QTimer, Qt, QDate
 from linux_admin.ui.workers import SSHWorker
 
 class GPUTab(QWidget):
@@ -177,15 +179,28 @@ class GPUTab(QWidget):
         
         controls = QHBoxLayout()
         self.hist_timeframe = QComboBox()
-        self.hist_timeframe.addItems(["Today", "This Week", "This Month", "All Time"])
+        self.hist_timeframe.addItems(["Today", "This Week", "This Month", "All Time", "Custom Date"])
+        self.hist_timeframe.currentTextChanged.connect(self.on_timeframe_changed)
+        
+        self.hist_date_picker = QDateEdit()
+        self.hist_date_picker.setCalendarPopup(True)
+        self.hist_date_picker.setDate(QDate.currentDate())
+        self.hist_date_picker.setVisible(False)
+        
         self.btn_calc_hist = QPushButton("Fetch & Plot Data")
         self.btn_calc_hist.setObjectName("PrimaryBtn")
         self.btn_calc_hist.clicked.connect(self.calculate_historical)
         
+        self.btn_export_csv = QPushButton("Export CSV (5-Min Avg)")
+        self.btn_export_csv.setStyleSheet("background-color: #a6e3a1; color: #11111b; font-weight: bold;")
+        self.btn_export_csv.clicked.connect(self.export_csv)
+        
         controls.addWidget(QLabel("Timeframe:"))
         controls.addWidget(self.hist_timeframe)
+        controls.addWidget(self.hist_date_picker)
         controls.addWidget(self.btn_calc_hist)
         controls.addStretch()
+        controls.addWidget(self.btn_export_csv)
         layout.addLayout(controls)
         
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -295,6 +310,25 @@ class GPUTab(QWidget):
             self.user_table.setRowCount(0)
             self.user_proc_table.setRowCount(0)
 
+    def on_timeframe_changed(self, text):
+        self.hist_date_picker.setVisible(text == "Custom Date")
+
+    def get_time_bounds(self):
+        tf = self.hist_timeframe.currentText()
+        end_str = "tomorrow 00:00:00" 
+        
+        if tf == "Today": start_str = "today 00:00:00"
+        elif tf == "This Week": start_str = "last sunday 00:00:00" 
+        elif tf == "This Month": start_str = "1 month ago"
+        elif tf == "Custom Date":
+            d = self.hist_date_picker.date().toString("yyyy-MM-dd")
+            start_str = f"{d} 00:00:00"
+            end_str = f"{d} 23:59:59"
+        else: 
+            start_str = "1970-01-01"
+            
+        return start_str, end_str
+
     def deploy_agent(self):
         dev = self.device_combo.currentData()
         if not dev: return
@@ -307,7 +341,6 @@ cat << 'EOF' > /usr/local/bin/gpu_admin_agent.sh
 LOG="/var/log/gpu_admin_metrics.log"
 while true; do
     TS=$(date +%s)
-    # Reduced GPU_STATS: Omitted static name & memory.total to save space
     GPU_STATS=$(nvidia-smi --query-gpu=index,utilization.gpu,memory.used,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null | tr '\n' ';' | sed 's/;$//')
 
     PRC_STATS=$(nvidia-smi | awk '/^\|.* [CG\+]+ .*MiB \|$/' | while read -r line; do
@@ -315,7 +348,6 @@ while true; do
         vram=$(echo "$line" | grep -oE "[0-9]+ *MiB" | tr -d ' MiB')
         if [ -n "$pid" ]; then
             user=$(ps -o ruser= -p "$pid" | tr -d ' ' | tail -n 1)
-            # Use 'comm' instead of 'args' to save storage on massive executable strings
             comm=$(ps -p "$pid" -o comm= 2>/dev/null | tail -n 1 || echo "Unknown")
             safe_cmd=$(echo "$comm" | tr -d ';|,')
             echo "${pid},${vram},${user},${safe_cmd}"
@@ -504,16 +536,13 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
         self.btn_calc_hist.setEnabled(False)
         self.btn_calc_hist.setText("Calculating...")
         
-        tf = self.hist_timeframe.currentText()
-        if tf == "Today": date_str = "today 00:00:00"
-        elif tf == "This Week": date_str = "last sunday 00:00:00" 
-        elif tf == "This Month": date_str = "1 month ago"
-        else: date_str = "1970-01-01"
+        start_str, end_str = self.get_time_bounds()
 
         bash_payload = f"""
-        START_TS=$(date -d '{date_str}' +%s 2>/dev/null || echo 0)
-        awk -F'|' -v start="$START_TS" '
-        $1 >= start {{
+        START_TS=$(date -d '{start_str}' +%s 2>/dev/null || echo 0)
+        END_TS=$(date -d '{end_str}' +%s 2>/dev/null || echo 9999999999)
+        awk -F'|' -v start="$START_TS" -v end="$END_TS" '
+        $1 >= start && $1 <= end {{
             ts = $1
             split($3, procs, ";")
             delete current_vram
@@ -527,14 +556,12 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                 }}
             }}
             
-            # Buckets of 1 minute to avoid massive graph data
             bucket = int(ts / 60) * 60
             for (u in current_vram) {{
                 if (current_vram[u] > bucket_max[bucket SUBSEP u]) {{
                     bucket_max[bucket SUBSEP u] = current_vram[u]
                 }}
                 
-                # Summary Stats Tracker
                 if (!seen[ts SUBSEP u]) {{
                     user_total_vram[u] += current_vram[u]
                     user_samples[u]++
@@ -600,7 +627,6 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                         user_ts_data[user]['vram'].append(vram)
                     except: pass
                 
-                # Plot User Timeline with Zero Padding for Gaps > 2 Mins (Displays clear slots)
                 for i, (user, data) in enumerate(user_ts_data.items()):
                     sorted_pairs = sorted(zip(data['ts'], data['vram']))
                     ts_sorted = []
@@ -609,7 +635,6 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                     
                     for ts, vram in sorted_pairs:
                         if last_ts is not None and (ts - last_ts) > 120:
-                            # Drop to zero in graph when user stopped using
                             ts_sorted.append(last_ts + 60)
                             vram_sorted.append(0)
                             ts_sorted.append(ts - 60)
@@ -619,7 +644,6 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                         vram_sorted.append(vram)
                         last_ts = ts
                         
-                    # Drop to zero at end to close graph
                     if last_ts is not None:
                         ts_sorted.append(last_ts + 60)
                         vram_sorted.append(0)
@@ -630,6 +654,103 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                                             fillLevel=0, 
                                             brush=pg.mkBrush(c+'60'), 
                                             name=user)
+
+    def export_csv(self):
+        dev = self.device_combo.currentData()
+        if not dev: 
+            QMessageBox.warning(self, "No Device", "Please select a target device first.")
+            return
+            
+        start_str, end_str = self.get_time_bounds()
+
+        bash_payload = f"""
+        START_TS=$(date -d '{start_str}' +%s 2>/dev/null || echo 0)
+        END_TS=$(date -d '{end_str}' +%s 2>/dev/null || echo 9999999999)
+        awk -F'|' -v start="$START_TS" -v end="$END_TS" '
+        $1 >= start && $1 <= end {{
+            ts = $1
+            split($3, procs, ";")
+            delete current_vram
+            for (i in procs) {{
+                if (procs[i] == "") continue
+                split(procs[i], p_info, ",")
+                vram = p_info[2] + 0
+                user = p_info[3]
+                if (user != "") {{
+                    current_vram[user] += vram
+                }}
+            }}
+            
+            bucket = int(ts / 300) * 300
+            for (u in current_vram) {{
+                if (!seen[ts SUBSEP u]) {{
+                    bucket_sum[bucket SUBSEP u] += current_vram[u]
+                    bucket_count[bucket SUBSEP u]++
+                    seen[ts SUBSEP u] = 1
+                }}
+            }}
+        }}
+        END {{
+            for (b_u in bucket_sum) {{
+                split(b_u, arr, SUBSEP)
+                bucket = arr[1]
+                user = arr[2]
+                avg_vram = int(bucket_sum[b_u] / bucket_count[b_u])
+                printf "%s,%s,%d\\n", bucket, user, avg_vram
+            }}
+        }}' /var/log/gpu_admin_metrics.log || echo "ERROR"
+        """
+        cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
+        
+        self.btn_export_csv.setEnabled(False)
+        self.btn_export_csv.setText("Generating...")
+        
+        worker = SSHWorker(dev, cmd, self.sec_mgr)
+        worker.finished.connect(self.on_csv_ready)
+        self.active_workers.append(worker)
+        worker.start()
+
+    def on_csv_ready(self, result):
+        self.btn_export_csv.setEnabled(True)
+        self.btn_export_csv.setText("Export CSV (5-Min Avg)")
+        
+        if result['code'] != 0 or "ERROR" in result['stdout']:
+            QMessageBox.critical(self, "Export Failed", f"Could not generate CSV data.\n{result['stderr']}")
+            return
+            
+        lines = result['stdout'].strip().split('\n')
+        
+        parsed_data = []
+        for line in lines:
+            if not line: continue
+            parts = line.split(',')
+            if len(parts) == 3:
+                try:
+                    ts = int(parts[0])
+                    user = parts[1]
+                    vram = int(parts[2])
+                    parsed_data.append((ts, user, vram))
+                except Exception: pass
+                
+        # Sort chronologically by start time (ts)
+        parsed_data.sort(key=lambda x: x[0])
+        
+        csv_lines = ["Username,Start Time,End Time,VRAM (MB)"]
+        for ts, user, vram in parsed_data:
+            start_time_str = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+            end_time_str = datetime.datetime.fromtimestamp(ts + 300).strftime('%Y-%m-%d %H:%M:%S')
+            csv_lines.append(f"{user},{start_time_str},{end_time_str},{vram}")
+                
+        csv_data = "\n".join(csv_lines)
+        
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Export Data", "gpu_usage_5min_avg.csv", "CSV Files (*.csv)")
+        if file_path:
+            try:
+                with open(file_path, 'w') as f:
+                    f.write(csv_data)
+                QMessageBox.information(self, "Success", f"5-Minute Averaged GPU Usage exported successfully to:\n{file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "File Error", f"Failed to save file:\n{str(e)}")
 
     def poll_metrics(self):
         dev = self.device_combo.currentData()
