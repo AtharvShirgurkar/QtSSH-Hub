@@ -191,7 +191,7 @@ class GPUTab(QWidget):
         self.btn_calc_hist.setObjectName("PrimaryBtn")
         self.btn_calc_hist.clicked.connect(self.calculate_historical)
         
-        self.btn_export_csv = QPushButton("Export CSV (5-Min Avg)")
+        self.btn_export_csv = QPushButton("Export CSV (Merged Sessions)")
         self.btn_export_csv.setStyleSheet("background-color: #a6e3a1; color: #11111b; font-weight: bold;")
         self.btn_export_csv.clicked.connect(self.export_csv)
         
@@ -681,6 +681,7 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                 }}
             }}
             
+            # Group into 5 minute buckets initially for noise reduction
             bucket = int(ts / 300) * 300
             for (u in current_vram) {{
                 if (!seen[ts SUBSEP u]) {{
@@ -703,7 +704,7 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
         cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
         
         self.btn_export_csv.setEnabled(False)
-        self.btn_export_csv.setText("Generating...")
+        self.btn_export_csv.setText("Exporting...")
         
         worker = SSHWorker(dev, cmd, self.sec_mgr)
         worker.finished.connect(self.on_csv_ready)
@@ -712,7 +713,7 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
 
     def on_csv_ready(self, result):
         self.btn_export_csv.setEnabled(True)
-        self.btn_export_csv.setText("Export CSV (5-Min Avg)")
+        self.btn_export_csv.setText("Export CSV (Merged Sessions)")
         
         if result['code'] != 0 or "ERROR" in result['stdout']:
             QMessageBox.critical(self, "Export Failed", f"Could not generate CSV data.\n{result['stderr']}")
@@ -732,23 +733,58 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                     parsed_data.append((ts, user, vram))
                 except Exception: pass
                 
-        # Sort chronologically by start time (ts)
+        # Sort chronologically
         parsed_data.sort(key=lambda x: x[0])
         
-        csv_lines = ["Username,Start Time,End Time,VRAM (MB)"]
+        # Merge Contiguous Blocks logic
+        user_blocks = {}
         for ts, user, vram in parsed_data:
-            start_time_str = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
-            end_time_str = datetime.datetime.fromtimestamp(ts + 300).strftime('%Y-%m-%d %H:%M:%S')
-            csv_lines.append(f"{user},{start_time_str},{end_time_str},{vram}")
+            if user not in user_blocks:
+                user_blocks[user] = []
+                
+            blocks = user_blocks[user]
+            if not blocks:
+                blocks.append({'start_ts': ts, 'end_ts': ts + 300, 'vrams': [vram]})
+            else:
+                last_block = blocks[-1]
+                # If this timebucket continues directly from the previous block
+                if ts <= last_block['end_ts']:
+                    last_block['end_ts'] = max(last_block['end_ts'], ts + 300)
+                    last_block['vrams'].append(vram)
+                else:
+                    # Gap detected, begin a new continuous block
+                    blocks.append({'start_ts': ts, 'end_ts': ts + 300, 'vrams': [vram]})
+
+        # Flatten the dictionary back to a sorted list of rows
+        final_rows = []
+        for user, blocks in user_blocks.items():
+            for b in blocks:
+                # Average the VRAM over the continuous usage block
+                avg_vram = int(sum(b['vrams']) / len(b['vrams']))
+                final_rows.append((user, b['start_ts'], b['end_ts'], avg_vram))
+                
+        # Final sort by chronological start time
+        final_rows.sort(key=lambda x: x[1])
+        
+        csv_lines = ["Username,Start Time,End Time,Total Time,Average VRAM (MB)"]
+        for user, start_ts, end_ts, vram in final_rows:
+            start_time_str = datetime.datetime.fromtimestamp(start_ts).strftime('%Y-%m-%d %H:%M:%S')
+            end_time_str = datetime.datetime.fromtimestamp(end_ts).strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Calculate the total duration
+            total_seconds = end_ts - start_ts
+            total_time_str = str(datetime.timedelta(seconds=total_seconds))
+            
+            csv_lines.append(f"{user},{start_time_str},{end_time_str},{total_time_str},{vram}")
                 
         csv_data = "\n".join(csv_lines)
         
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Export Data", "gpu_usage_5min_avg.csv", "CSV Files (*.csv)")
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Export Data", "gpu_usage_merged_sessions.csv", "CSV Files (*.csv)")
         if file_path:
             try:
                 with open(file_path, 'w') as f:
                     f.write(csv_data)
-                QMessageBox.information(self, "Success", f"5-Minute Averaged GPU Usage exported successfully to:\n{file_path}")
+                QMessageBox.information(self, "Success", f"Merged Sessions GPU Usage exported successfully to:\n{file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "File Error", f"Failed to save file:\n{str(e)}")
 
