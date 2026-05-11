@@ -67,7 +67,9 @@ class GPUTab(QWidget):
         
         self.timer = QTimer()
         self.timer.timeout.connect(self.poll_metrics)
-        self.timer.start(4000) 
+        # UI polls every 10 seconds for maximum responsiveness.
+        # Minimal overhead since the live log is strictly capped at 150 lines.
+        self.timer.start(10000) 
         self.refresh_devices()
 
     def style_plot(self, p, title):
@@ -297,8 +299,10 @@ class GPUTab(QWidget):
 
     def reset_graphs(self):
         self.gpu_history.clear()
-        self.util_plot.clear(); self.vram_plot.clear()
-        self.temp_plot.clear(); self.power_plot.clear()
+        self.util_plot.clear()
+        self.vram_plot.clear()
+        self.temp_plot.clear()
+        self.power_plot.clear()
         if hasattr(self, 'timeline_plot'):
             self.timeline_plot.clear()
         self.gpu_curves = {'util': {}, 'vram': {}, 'temp': {}, 'power': {}}
@@ -309,6 +313,9 @@ class GPUTab(QWidget):
         if hasattr(self, 'user_table'):
             self.user_table.setRowCount(0)
             self.user_proc_table.setRowCount(0)
+            
+        # Instantly trigger a fast poll when changing tabs/devices so the user isn't stuck waiting
+        QTimer.singleShot(100, self.poll_metrics)
 
     def on_timeframe_changed(self, text):
         self.hist_date_picker.setVisible(text == "Custom Date")
@@ -316,18 +323,35 @@ class GPUTab(QWidget):
     def get_time_bounds(self):
         tf = self.hist_timeframe.currentText()
         end_str = "tomorrow 00:00:00" 
+        target_files = []
         
-        if tf == "Today": start_str = "today 00:00:00"
-        elif tf == "This Week": start_str = "last sunday 00:00:00" 
-        elif tf == "This Month": start_str = "1 month ago"
+        if tf == "Today":
+            start_str = "today 00:00:00"
+            d = datetime.date.today()
+            target_files.append(f"/var/log/gpu_metrics_history_{d.strftime('%Y-%m-%d')}.log")
+        elif tf == "This Week":
+            start_str = "last sunday 00:00:00" 
+            today = datetime.date.today()
+            for i in range(8):
+                d = today - datetime.timedelta(days=i)
+                target_files.append(f"/var/log/gpu_metrics_history_{d.strftime('%Y-%m-%d')}.log")
+        elif tf == "This Month":
+            start_str = "1 month ago"
+            today = datetime.date.today()
+            for i in range(32):
+                d = today - datetime.timedelta(days=i)
+                target_files.append(f"/var/log/gpu_metrics_history_{d.strftime('%Y-%m-%d')}.log")
         elif tf == "Custom Date":
-            d = self.hist_date_picker.date().toString("yyyy-MM-dd")
-            start_str = f"{d} 00:00:00"
-            end_str = f"{d} 23:59:59"
+            d_str = self.hist_date_picker.date().toString("yyyy-MM-dd")
+            start_str = f"{d_str} 00:00:00"
+            end_str = f"{d_str} 23:59:59"
+            target_files.append(f"/var/log/gpu_metrics_history_{d_str}.log")
         else: 
             start_str = "1970-01-01"
+            target_files = ["/var/log/gpu_metrics_history_*.log"]
             
-        return start_str, end_str
+        files_str = " ".join(target_files)
+        return start_str, end_str, files_str
 
     def deploy_agent(self):
         dev = self.device_combo.currentData()
@@ -338,9 +362,14 @@ class GPUTab(QWidget):
         bash_payload = r"""set -e
 cat << 'EOF' > /usr/local/bin/gpu_admin_agent.sh
 #!/bin/bash
-LOG="/var/log/gpu_admin_metrics.log"
+LIVE_LOG="/var/log/gpu_metrics_live.log"
+LAST_HIST=0
+
 while true; do
     TS=$(date +%s)
+    TODAY=$(date +%F)
+    HIST_LOG="/var/log/gpu_metrics_history_${TODAY}.log"
+    
     GPU_STATS=$(nvidia-smi --query-gpu=index,utilization.gpu,memory.used,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null | tr '\n' ';' | sed 's/;$//')
 
     PRC_STATS=$(nvidia-smi | awk '/^\|.* [CG\+]+ .*MiB \|$/' | while read -r line; do
@@ -354,11 +383,23 @@ while true; do
         fi
     done | tr '\n' ';' | sed 's/;$//')
 
-    echo "$TS|$GPU_STATS|$PRC_STATS" >> "$LOG"
+    LINE="$TS|$GPU_STATS|$PRC_STATS"
 
-    lines=$(wc -l < "$LOG" 2>/dev/null || echo 0)
-    if [ "$lines" -gt "500000" ]; then tail -n 400000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"; fi
-    sleep 4
+    # 1. LIVE LOG
+    echo "$LINE" >> "$LIVE_LOG"
+    tail -n 150 "$LIVE_LOG" > "$LIVE_LOG.tmp" && mv "$LIVE_LOG.tmp" "$LIVE_LOG"
+
+    # 2. HISTORY LOG (Daily File)
+    if [ -z "$LAST_HIST" ] || [ $((TS - LAST_HIST)) -ge 60 ]; then
+        echo "$LINE" >> "$HIST_LOG"
+        LAST_HIST=$TS
+        
+        # Auto-Cleanup: Delete daily logs older than 90 days to save disk space
+        find /var/log/ -name "gpu_metrics_history_*.log" -type f -mtime +90 -delete 2>/dev/null || true
+    fi
+
+    # Agent runs efficiently every 60s
+    sleep 60
 done
 EOF
 
@@ -536,12 +577,13 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
         self.btn_calc_hist.setEnabled(False)
         self.btn_calc_hist.setText("Calculating...")
         
-        start_str, end_str = self.get_time_bounds()
+        start_str, end_str, files_str = self.get_time_bounds()
 
         bash_payload = f"""
         START_TS=$(date -d '{start_str}' +%s 2>/dev/null || echo 0)
         END_TS=$(date -d '{end_str}' +%s 2>/dev/null || echo 9999999999)
-        awk -F'|' -v start="$START_TS" -v end="$END_TS" '
+        
+        cat {files_str} 2>/dev/null | awk -F'|' -v start="$START_TS" -v end="$END_TS" '
         $1 >= start && $1 <= end {{
             ts = $1
             split($3, procs, ";")
@@ -581,7 +623,7 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                 split(b_u, arr, SUBSEP)
                 printf "%s|%s|%d\\n", arr[1], arr[2], bucket_max[b_u]
             }}
-        }}' /var/log/gpu_admin_metrics.log || echo "ERROR"
+        }}' || echo "ERROR"
         """
         cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
         worker = SSHWorker(dev, cmd, self.sec_mgr)
@@ -634,7 +676,7 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                     last_ts = None
                     
                     for ts, vram in sorted_pairs:
-                        if last_ts is not None and (ts - last_ts) > 120:
+                        if last_ts is not None and (ts - last_ts) > 180:
                             ts_sorted.append(last_ts + 60)
                             vram_sorted.append(0)
                             ts_sorted.append(ts - 60)
@@ -661,12 +703,13 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
             QMessageBox.warning(self, "No Device", "Please select a target device first.")
             return
             
-        start_str, end_str = self.get_time_bounds()
+        start_str, end_str, files_str = self.get_time_bounds()
 
         bash_payload = f"""
         START_TS=$(date -d '{start_str}' +%s 2>/dev/null || echo 0)
         END_TS=$(date -d '{end_str}' +%s 2>/dev/null || echo 9999999999)
-        awk -F'|' -v start="$START_TS" -v end="$END_TS" '
+        
+        cat {files_str} 2>/dev/null | awk -F'|' -v start="$START_TS" -v end="$END_TS" '
         $1 >= start && $1 <= end {{
             ts = $1
             split($3, procs, ";")
@@ -681,7 +724,6 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                 }}
             }}
             
-            # Group into 5 minute buckets initially for noise reduction
             bucket = int(ts / 300) * 300
             for (u in current_vram) {{
                 if (!seen[ts SUBSEP u]) {{
@@ -699,7 +741,7 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                 avg_vram = int(bucket_sum[b_u] / bucket_count[b_u])
                 printf "%s,%s,%d\\n", bucket, user, avg_vram
             }}
-        }}' /var/log/gpu_admin_metrics.log || echo "ERROR"
+        }}' || echo "ERROR"
         """
         cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
         
@@ -733,10 +775,8 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                     parsed_data.append((ts, user, vram))
                 except Exception: pass
                 
-        # Sort chronologically
         parsed_data.sort(key=lambda x: x[0])
         
-        # Merge Contiguous Blocks logic
         user_blocks = {}
         for ts, user, vram in parsed_data:
             if user not in user_blocks:
@@ -747,23 +787,18 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
                 blocks.append({'start_ts': ts, 'end_ts': ts + 300, 'vrams': [vram]})
             else:
                 last_block = blocks[-1]
-                # If this timebucket continues directly from the previous block
                 if ts <= last_block['end_ts']:
                     last_block['end_ts'] = max(last_block['end_ts'], ts + 300)
                     last_block['vrams'].append(vram)
                 else:
-                    # Gap detected, begin a new continuous block
                     blocks.append({'start_ts': ts, 'end_ts': ts + 300, 'vrams': [vram]})
 
-        # Flatten the dictionary back to a sorted list of rows
         final_rows = []
         for user, blocks in user_blocks.items():
             for b in blocks:
-                # Average the VRAM over the continuous usage block
                 avg_vram = int(sum(b['vrams']) / len(b['vrams']))
                 final_rows.append((user, b['start_ts'], b['end_ts'], avg_vram))
                 
-        # Final sort by chronological start time
         final_rows.sort(key=lambda x: x[1])
         
         csv_lines = ["Username,Start Time,End Time,Total Time,Average VRAM (MB)"]
@@ -771,7 +806,6 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
             start_time_str = datetime.datetime.fromtimestamp(start_ts).strftime('%Y-%m-%d %H:%M:%S')
             end_time_str = datetime.datetime.fromtimestamp(end_ts).strftime('%Y-%m-%d %H:%M:%S')
             
-            # Calculate the total duration
             total_seconds = end_ts - start_ts
             total_time_str = str(datetime.timedelta(seconds=total_seconds))
             
@@ -795,7 +829,7 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
         
         bash_payload = f"""
         export PATH=$PATH:/usr/bin:/bin:/usr/local/bin:/sbin:/usr/sbin
-        if [ ! -f /var/log/gpu_admin_metrics.log ]; then echo "MISSING"; exit 0; fi
+        if [ ! -f /var/log/gpu_metrics_live.log ]; then echo "MISSING"; exit 0; fi
         
         echo "===SYS==="
         smi_out=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1)
@@ -807,7 +841,7 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
         nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader,nounits 2>/dev/null
         
         echo "DATA"
-        awk -F'|' -v ts="{self.last_fetched_ts}" '($1+0) > (ts+0)' /var/log/gpu_admin_metrics.log || true
+        awk -F'|' -v ts="{self.last_fetched_ts}" '($1+0) > (ts+0)' /var/log/gpu_metrics_live.log 2>/dev/null || true
         """
         cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
         
@@ -836,13 +870,18 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
         self.status_lbl.setStyleSheet("color: #a6e3a1; padding: 5px; background: #313244; border-radius: 5px;")
         
         try:
+            # Re-engineered parsing so that random blank lines or carriage returns never break the UI
             if "===SYS===" in stdout:
-                sys_parts = stdout.split("===SYS===")[1].split("===STATIC===")
+                sys_part_raw = stdout.split("===SYS===")[1]
+                sys_parts = sys_part_raw.split("===STATIC===")
                 self.driver_lbl.setText(sys_parts[0].strip())
                 
-                static_parts = sys_parts[1].split("DATA\n")
+                static_str = sys_parts[1]
+                static_parts = static_str.split("DATA")
                 static_lines = static_parts[0].strip().split('\n')
-                data_lines = static_parts[1].strip().split('\n') if len(static_parts) > 1 else []
+                
+                data_lines_raw = static_parts[1].strip() if len(static_parts) > 1 else ""
+                data_lines = data_lines_raw.split('\n') if data_lines_raw else []
                 
                 for line in static_lines:
                     if not line: continue
