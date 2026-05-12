@@ -3,6 +3,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTa
                              QSplitter, QTextEdit, QFileDialog, QGroupBox, QCheckBox)
 from PyQt6.QtCore import pyqtSignal, Qt
 import os
+import csv
 from linux_admin.ui.workers import SSHWorker
 
 class DeviceDialog(QDialog):
@@ -176,6 +177,9 @@ class DevicesTab(QWidget):
         
         d_controls = QHBoxLayout()
         self.btn_add_device = QPushButton("Add Server")
+        
+        self.btn_bulk_import = QPushButton("Bulk Import CSV")
+        
         self.btn_edit_device = QPushButton("Edit")
         self.btn_remove_device = QPushButton("Remove")
         self.btn_remove_device.setObjectName("DangerBtn")
@@ -189,6 +193,7 @@ class DevicesTab(QWidget):
         self.btn_test_all.setObjectName("PrimaryBtn")
         
         d_controls.addWidget(self.btn_add_device)
+        d_controls.addWidget(self.btn_bulk_import)
         d_controls.addWidget(self.btn_edit_device)
         d_controls.addWidget(self.btn_remove_device)
         d_controls.addStretch()
@@ -212,6 +217,7 @@ class DevicesTab(QWidget):
         self.btn_add_group.clicked.connect(self.add_group)
         self.btn_remove_group.clicked.connect(self.remove_group)
         self.btn_add_device.clicked.connect(self.add_device)
+        self.btn_bulk_import.clicked.connect(self.bulk_import_csv)
         self.btn_edit_device.clicked.connect(self.edit_device)
         self.btn_remove_device.clicked.connect(self.remove_device)
         self.btn_test_conn.clicked.connect(self.test_connection)
@@ -317,6 +323,49 @@ class DevicesTab(QWidget):
                 data['auth_type'], enc_cred, data['group_id'], data['has_gpu']
             )
             self.load_devices()
+
+    def bulk_import_csv(self):
+        QMessageBox.information(self, "CSV Format Required",
+            "Please ensure your CSV is formatted as follows (no headers needed):\n\n"
+            "Name, IP, Port, Username, Auth Type (password/key), Credential, Group Name, Has GPU (0/1)\n\n"
+            "Note: Missing groups will automatically be created."
+        )
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Devices CSV", "", "CSV Files (*.csv);;All Files (*)")
+        if not file_path: return
+
+        success_count = 0
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                groups_map = {g['name']: g['id'] for g in self.db_mgr.get_groups()}
+
+                for row in reader:
+                    if not row or len(row) < 6: continue
+                    name = row[0].strip()
+                    ip = row[1].strip()
+                    port = int(row[2].strip() if row[2].strip().isdigit() else 22)
+                    username = row[3].strip()
+                    auth_type = row[4].strip().lower()
+                    credential = row[5].strip()
+
+                    group_name = row[6].strip() if len(row) > 6 else ""
+                    group_id = None
+                    if group_name:
+                        if group_name not in groups_map:
+                            self.db_mgr.add_group(group_name)
+                            groups_map = {g['name']: g['id'] for g in self.db_mgr.get_groups()}
+                        group_id = groups_map[group_name]
+
+                    has_gpu = int(row[7].strip()) if len(row) > 7 and row[7].strip().isdigit() else 0
+
+                    enc_cred = self.sec_mgr.encrypt(credential)
+                    self.db_mgr.add_device(name, ip, port, username, auth_type, enc_cred, group_id, has_gpu)
+                    success_count += 1
+
+            self.load_data()
+            QMessageBox.information(self, "Success", f"Successfully imported {success_count} devices.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import CSV:\n{str(e)}")
 
     def edit_device(self):
         row = self.table.currentRow()
