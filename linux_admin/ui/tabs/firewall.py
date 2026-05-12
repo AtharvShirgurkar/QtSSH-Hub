@@ -224,13 +224,69 @@ class FirewallTab(QWidget):
         
         cmd = ""
         if self.detected_fw == 'ufw':
-            # Target can be a rule number or a command equivalent (e.g. 'allow 80/tcp')
-            cmd = f"ufw --force delete {target}"
+            # Bash script to handle numeric rule ID vs port/service string gracefully
+            cmd = f"""
+TARGET="{target}"
+if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
+    # Delete by rule number
+    OUT=$(ufw --force delete $TARGET 2>&1)
+    if echo "$OUT" | grep -qi "Invalid"; then
+        echo "Error: Rule number '$TARGET' does not exist."
+    else
+        echo "$OUT"
+    fi
+else
+    # Delete by port/protocol or service name
+    ERR=0
+    OUT_A=$(ufw delete allow $TARGET 2>&1 || true)
+    OUT_D=$(ufw delete deny $TARGET 2>&1 || true)
+    
+    if echo "$OUT_A" | grep -qi "Could not delete"; then ERR=$((ERR+1)); fi
+    if echo "$OUT_D" | grep -qi "Could not delete"; then ERR=$((ERR+1)); fi
+    
+    if [ $ERR -eq 2 ]; then
+        echo "Error: Could not find any rule matching port/service '$TARGET' to delete."
+    else
+        echo "Successfully removed rules matching '$TARGET'."
+    fi
+fi
+"""
         elif self.detected_fw == 'firewalld':
-            # Simplified removal for standard ports. Rich rules require exact string matching.
-            if '/' in target:
-                cmd = f"firewall-cmd --permanent --remove-port={target} && firewall-cmd --reload"
-            else:
-                cmd = f"firewall-cmd --permanent --remove-port={target}/tcp && firewall-cmd --permanent --remove-port={target}/udp && firewall-cmd --reload"
+            # Bash script to route to port, multi-port, or service deletion gracefully
+            cmd = f"""
+TARGET="{target}"
+if [[ "$TARGET" == *"/"* ]]; then
+    # Target has a specific protocol (e.g., 80/tcp)
+    OUT=$(firewall-cmd --permanent --remove-port=$TARGET 2>&1 || true)
+    if echo "$OUT" | grep -qi "NOT_ENABLED"; then
+        echo "Error: Rule '$TARGET' is not currently enabled."
+    else
+        firewall-cmd --reload >/dev/null
+        echo "Successfully removed '$TARGET'."
+    fi
+elif [[ "$TARGET" =~ ^[0-9]+$ ]]; then
+    # Target is just a numeric port (e.g., 8080) - check both tcp and udp
+    OUT1=$(firewall-cmd --permanent --remove-port=$TARGET/tcp 2>&1 || true)
+    OUT2=$(firewall-cmd --permanent --remove-port=$TARGET/udp 2>&1 || true)
+    
+    if echo "$OUT1" | grep -qi "NOT_ENABLED" && echo "$OUT2" | grep -qi "NOT_ENABLED"; then
+        echo "Error: Port '$TARGET' is not currently enabled."
+    else
+        firewall-cmd --reload >/dev/null
+        echo "Successfully removed port '$TARGET'."
+    fi
+else
+    # Target is a service name (e.g., http, https, ssh)
+    OUT=$(firewall-cmd --permanent --remove-service=$TARGET 2>&1 || true)
+    if echo "$OUT" | grep -qi "NOT_ENABLED"; then
+        echo "Error: Service '$TARGET' is not currently enabled."
+    elif echo "$OUT" | grep -qi "INVALID_SERVICE"; then
+        echo "Error: '$TARGET' is not a valid/recognized service name."
+    else
+        firewall-cmd --reload >/dev/null
+        echo "Successfully removed service '$TARGET'."
+    fi
+fi
+"""
                 
         self.run_raw_cmd(cmd)

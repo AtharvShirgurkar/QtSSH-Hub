@@ -67,8 +67,6 @@ class GPUTab(QWidget):
         
         self.timer = QTimer()
         self.timer.timeout.connect(self.poll_metrics)
-        # UI polls every 10 seconds for maximum responsiveness.
-        # Minimal overhead since the live log is strictly capped at 150 lines.
         self.timer.start(10000) 
         self.refresh_devices()
 
@@ -314,7 +312,6 @@ class GPUTab(QWidget):
             self.user_table.setRowCount(0)
             self.user_proc_table.setRowCount(0)
             
-        # Instantly trigger a fast poll when changing tabs/devices so the user isn't stuck waiting
         QTimer.singleShot(100, self.poll_metrics)
 
     def on_timeframe_changed(self, text):
@@ -325,30 +322,31 @@ class GPUTab(QWidget):
         end_str = "tomorrow 00:00:00" 
         target_files = []
         
+        # Uses the new dedicated directory
         if tf == "Today":
             start_str = "today 00:00:00"
             d = datetime.date.today()
-            target_files.append(f"/var/log/gpu_metrics_history_{d.strftime('%Y-%m-%d')}.log")
+            target_files.append(f"/var/log/gpu_admin/gpu_metrics_history_{d.strftime('%Y-%m-%d')}.log")
         elif tf == "This Week":
             start_str = "last sunday 00:00:00" 
             today = datetime.date.today()
             for i in range(8):
                 d = today - datetime.timedelta(days=i)
-                target_files.append(f"/var/log/gpu_metrics_history_{d.strftime('%Y-%m-%d')}.log")
+                target_files.append(f"/var/log/gpu_admin/gpu_metrics_history_{d.strftime('%Y-%m-%d')}.log")
         elif tf == "This Month":
             start_str = "1 month ago"
             today = datetime.date.today()
             for i in range(32):
                 d = today - datetime.timedelta(days=i)
-                target_files.append(f"/var/log/gpu_metrics_history_{d.strftime('%Y-%m-%d')}.log")
+                target_files.append(f"/var/log/gpu_admin/gpu_metrics_history_{d.strftime('%Y-%m-%d')}.log")
         elif tf == "Custom Date":
             d_str = self.hist_date_picker.date().toString("yyyy-MM-dd")
             start_str = f"{d_str} 00:00:00"
             end_str = f"{d_str} 23:59:59"
-            target_files.append(f"/var/log/gpu_metrics_history_{d_str}.log")
+            target_files.append(f"/var/log/gpu_admin/gpu_metrics_history_{d_str}.log")
         else: 
             start_str = "1970-01-01"
-            target_files = ["/var/log/gpu_metrics_history_*.log"]
+            target_files = ["/var/log/gpu_admin/gpu_metrics_history_*.log"]
             
         files_str = " ".join(target_files)
         return start_str, end_str, files_str
@@ -360,15 +358,19 @@ class GPUTab(QWidget):
         self.status_lbl.setText("Deploying...")
 
         bash_payload = r"""set -e
+# Create the dedicated directory for logging
+mkdir -p /var/log/gpu_admin
+chmod 755 /var/log/gpu_admin
+
 cat << 'EOF' > /usr/local/bin/gpu_admin_agent.sh
 #!/bin/bash
-LIVE_LOG="/var/log/gpu_metrics_live.log"
+LIVE_LOG="/var/log/gpu_admin/gpu_metrics_live.log"
 LAST_HIST=0
 
 while true; do
     TS=$(date +%s)
     TODAY=$(date +%F)
-    HIST_LOG="/var/log/gpu_metrics_history_${TODAY}.log"
+    HIST_LOG="/var/log/gpu_admin/gpu_metrics_history_${TODAY}.log"
     
     GPU_STATS=$(nvidia-smi --query-gpu=index,utilization.gpu,memory.used,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null | tr '\n' ';' | sed 's/;$//')
 
@@ -395,7 +397,7 @@ while true; do
         LAST_HIST=$TS
         
         # Auto-Cleanup: Delete daily logs older than 90 days to save disk space
-        find /var/log/ -name "gpu_metrics_history_*.log" -type f -mtime +90 -delete 2>/dev/null || true
+        find /var/log/gpu_admin/ -name "gpu_metrics_history_*.log" -type f -mtime +90 -delete 2>/dev/null || true
     fi
 
     # Agent runs efficiently every 60s
@@ -829,7 +831,7 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
         
         bash_payload = f"""
         export PATH=$PATH:/usr/bin:/bin:/usr/local/bin:/sbin:/usr/sbin
-        if [ ! -f /var/log/gpu_metrics_live.log ]; then echo "MISSING"; exit 0; fi
+        if [ ! -f /var/log/gpu_admin/gpu_metrics_live.log ]; then echo "MISSING"; exit 0; fi
         
         echo "===SYS==="
         smi_out=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1)
@@ -841,7 +843,7 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
         nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader,nounits 2>/dev/null
         
         echo "DATA"
-        awk -F'|' -v ts="{self.last_fetched_ts}" '($1+0) > (ts+0)' /var/log/gpu_metrics_live.log 2>/dev/null || true
+        awk -F'|' -v ts="{self.last_fetched_ts}" '($1+0) > (ts+0)' /var/log/gpu_admin/gpu_metrics_live.log 2>/dev/null || true
         """
         cmd = f"bash -c 'echo {base64.b64encode(bash_payload.encode()).decode()} | base64 -d | bash'"
         
@@ -870,7 +872,6 @@ systemctl daemon-reload && systemctl enable --now gpu_admin_agent.service
         self.status_lbl.setStyleSheet("color: #a6e3a1; padding: 5px; background: #313244; border-radius: 5px;")
         
         try:
-            # Re-engineered parsing so that random blank lines or carriage returns never break the UI
             if "===SYS===" in stdout:
                 sys_part_raw = stdout.split("===SYS===")[1]
                 sys_parts = sys_part_raw.split("===STATIC===")

@@ -348,6 +348,15 @@ class DevicesTab(QWidget):
                     auth_type = row[4].strip().lower()
                     credential = row[5].strip()
 
+                    # If auth is 'key' and the string provided is a valid file path, read the file
+                    if auth_type == 'key' and os.path.isfile(credential):
+                        try:
+                            with open(credential, 'r', encoding='utf-8') as key_file:
+                                credential = key_file.read()
+                        except Exception as e:
+                            QMessageBox.warning(self, "Key Import Error", f"Failed to read key file for {name} at {credential}:\n{str(e)}")
+                            continue # Skip importing this device if the key file can't be read
+
                     group_name = row[6].strip() if len(row) > 6 else ""
                     group_id = None
                     if group_name:
