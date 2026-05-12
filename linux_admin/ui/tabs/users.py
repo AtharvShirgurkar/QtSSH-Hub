@@ -1,20 +1,21 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QLabel, QTextEdit, 
                              QPushButton, QRadioButton, QButtonGroup, QGroupBox, QLineEdit, QSplitter, QCheckBox, QFormLayout)
 from PyQt6.QtCore import Qt
-import base64
-from linux_admin.ui.workers import SSHWorker
+from linux_admin.core.ansible_manager import AnsibleManager
+from linux_admin.ui.workers import AnsibleGenericWorker
 
 class UsersTab(QWidget):
     def __init__(self, sec_mgr, db_mgr):
         super().__init__()
         self.sec_mgr = sec_mgr
         self.db_mgr = db_mgr
+        self.ansible_mgr = AnsibleManager(sec_mgr)
         self.active_workers = []
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         
-        title = QLabel("Users & Permissions Manager")
+        title = QLabel("Users & Permissions Manager (Ansible Managed)")
         title.setStyleSheet("font-size: 20px; font-weight: bold; color: #cdd6f4;")
         layout.addWidget(title)
         
@@ -52,7 +53,7 @@ class UsersTab(QWidget):
         self.u_name = QLineEdit()
         self.u_pass = QLineEdit()
         self.u_pass.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
-        self.u_shell = QLineEdit("bash")
+        self.u_shell = QLineEdit("/bin/bash")
         self.u_groups = QLineEdit()
         self.u_groups.setPlaceholderText("comma-separated, e.g. docker,www-data")
         self.u_expiry = QLineEdit()
@@ -157,59 +158,71 @@ class UsersTab(QWidget):
     def log(self, text):
         self.output_log.append(text)
 
-    def execute_batch(self, bash_script):
+    def execute_ansible(self, tasks):
         devices = self.target_combo.currentData()
         if not devices:
             self.log("No reachable devices selected.")
             return
-            
-        self.log(f"\n--- Initiating batch job on {len(devices)} target(s) ---")
-        b64_script = base64.b64encode(bash_script.encode('utf-8')).decode('utf-8')
-        cmd = f"bash -c 'echo {b64_script} | base64 -d | bash'"
-        
-        # Keep references to workers to prevent garbage collection mid-execution
-        self.active_workers = []
-        for dev in devices:
-            worker = SSHWorker(dev, cmd, self.sec_mgr, use_sudo=True)
-            worker.finished.connect(lambda r, n=dev['name']: self.on_worker_finished(r, n))
-            self.active_workers.append(worker)
-            worker.start()
 
-    def on_worker_finished(self, result, name):
-        if result['code'] == 0:
-            self.log(f"[SUCCESS] {name}:\n{result['stdout']}")
-        else:
-            self.log(f"[FAILED] {name}:\n{result['stderr']}\n{result['stdout']}")
+        self.log(f"\n--- Initiating Ansible payload on {len(devices)} target(s) ---")
+        
+        if not hasattr(self, 'active_workers'): self.active_workers = []
+        self.active_workers = [w for w in self.active_workers if w.isRunning()]
+
+        worker = AnsibleGenericWorker(self.ansible_mgr, devices, tasks)
+        worker.finished.connect(self.on_ansible_done)
+        self.active_workers.append(worker)
+        worker.start()
+
+    def on_ansible_done(self, out, err, code):
+        self.log(out)
+        if err: self.log(f"Ansible Errors:\n{err}")
 
     def apply_user(self):
         user = self.u_name.text().strip()
         pw = self.u_pass.text()
+        shell = self.u_shell.text().strip() or '/bin/bash'
+        create_home = self.u_home.isChecked()
+        skel = self.u_skel.text().strip()
+        groups = self.u_groups.text().strip()
+        expiry = self.u_expiry.text().strip()
+
         if not user:
             self.log("Username is required!")
             return
+
+        user_args = {
+            'name': user,
+            'state': 'present',
+            'shell': shell,
+            'create_home': create_home
+        }
+        
+        if skel:
+            user_args['skeleton'] = skel
+        if groups:
+            user_args['groups'] = groups
+            user_args['append'] = True  
             
-        script = f"""set -e
-SHELL_BIN=$(which "{self.u_shell.text().strip()}" 2>/dev/null || echo /bin/bash)
-ARGS=""
-if [ "{self.u_home.isChecked()}" = "True" ]; then ARGS="-m"; else ARGS="-M"; fi
-if [ -n "{self.u_skel.text().strip()}" ]; then ARGS="$ARGS -k {self.u_skel.text().strip()}"; fi
-if [ -n "{self.u_groups.text().strip()}" ]; then ARGS="$ARGS -G {self.u_groups.text().strip()}"; fi
-if [ -n "{self.u_expiry.text().strip()}" ]; then ARGS="$ARGS -e {self.u_expiry.text().strip()}"; fi
+        if expiry:
+            try:
+                import time
+                epoch = int(time.mktime(time.strptime(expiry, "%Y-%m-%d")))
+                user_args['expires'] = epoch
+            except ValueError:
+                self.log("Invalid expiry format. Use YYYY-MM-DD")
+                return
 
-if id "{user}" &>/dev/null; then
-    usermod -s "$SHELL_BIN" $ARGS "{user}"
-    echo "User '{user}' successfully modified."
-else
-    useradd $ARGS -s "$SHELL_BIN" "{user}"
-    echo "User '{user}' successfully created."
-fi
+        if pw:
+            # Hash the password automatically leveraging the target server's crypto support dynamically via Ansible inline jinja 
+            user_args['password'] = f"{{{{ '{pw}' | password_hash('sha512') }}}}"
 
-if [ -n "{pw}" ]; then
-    echo "{user}:{pw}" | chpasswd
-    echo "Password updated."
-fi
-"""
-        self.execute_batch(script)
+        tasks = [{
+            'name': f"Manage user account '{user}'",
+            'ansible.builtin.user': user_args
+        }]
+
+        self.execute_ansible(tasks)
 
     def apply_sudo(self):
         user = self.s_user.text().strip()
@@ -219,38 +232,31 @@ fi
             self.log("Username and Command are required for Sudoers.")
             return
 
-        script = f"""set -e
-USER="{user}"
-FILE="/etc/sudoers.d/${{USER}}_custom"
-
-# Write out the rule
-echo "$USER ALL=(ALL) {nopw} {cmd}" > "$FILE"
-chmod 440 "$FILE"
-
-# Always safely check the sudoers file syntax
-if visudo -c -f "$FILE" &>/dev/null; then
-    echo "Sudoers rule safely applied for $USER."
-else
-    rm -f "$FILE"
-    echo "Syntax error detected! Sudoers file was rejected and safely removed."
-    exit 1
-fi
-"""
-        self.execute_batch(script)
+        tasks = [{
+            'name': f"Configure sudoers delegation for '{user}'",
+            'ansible.builtin.copy': {
+                'dest': f"/etc/sudoers.d/{user}_custom",
+                'content': f"{user} ALL=(ALL) {nopw} {cmd}\n",
+                'mode': '0440',
+                'validate': 'visudo -cf %s'
+            }
+        }]
+        
+        self.execute_ansible(tasks)
 
     def revoke_sudo(self):
         user = self.s_user.text().strip()
         if not user: return
-        script = f"""
-USER="{user}"
-if ls /etc/sudoers.d/${{USER}}* 1> /dev/null 2>&1; then
-    rm -f /etc/sudoers.d/${{USER}}*
-    echo "All custom sudoers rules removed for $USER."
-else
-    echo "No custom rules found in /etc/sudoers.d/ for $USER."
-fi
-"""
-        self.execute_batch(script)
+        
+        tasks = [{
+            'name': f"Revoke custom sudoers configuration for '{user}'",
+            'ansible.builtin.file': {
+                'path': f"/etc/sudoers.d/{user}_custom",
+                'state': 'absent'
+            }
+        }]
+        
+        self.execute_ansible(tasks)
 
     def delete_user(self):
         user = self.d_user.text().strip()
@@ -258,27 +264,26 @@ fi
         
         rm_home = self.d_rm_home.isChecked()
         backup = self.d_backup.isChecked()
-        
-        cmd_parts = []
+
+        tasks = []
         if rm_home and backup:
-            cmd_parts.append(f'''
-if [ -d "/home/{user}" ]; then
-    echo "Backing up /home/{user} to /root/{user}_home_backup_$(date +%F).tar.xz..."
-    tar -cJf "/root/{user}_home_backup_$(date +%F).tar.xz" -C /home "{user}"
-fi
-''')
+            tasks.append({
+                'name': f"Backup home directory for '{user}' prior to deletion",
+                'ansible.builtin.archive': {
+                    'path': f"/home/{user}",
+                    'dest': f"/root/{user}_home_backup.tar.xz",
+                    'format': 'xz'
+                },
+                'ignore_errors': True
+            })
+
+        tasks.append({
+            'name': f"Delete user account '{user}'",
+            'ansible.builtin.user': {
+                'name': user,
+                'state': 'absent',
+                'remove': rm_home
+            }
+        })
         
-        if rm_home:
-            cmd_parts.append(f'userdel -r "{user}" 2>/dev/null || userdel "{user}"')
-        else:
-            cmd_parts.append(f'userdel "{user}"')
-            
-        script = f"""
-if id "{user}" &>/dev/null; then
-    {''.join(cmd_parts)}
-    echo "User '{user}' removed from system."
-else
-    echo "User '{user}' does not exist."
-fi
-"""
-        self.execute_batch(script)
+        self.execute_ansible(tasks)

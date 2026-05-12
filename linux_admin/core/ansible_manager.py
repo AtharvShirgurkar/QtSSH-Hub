@@ -8,6 +8,28 @@ class AnsibleManager:
         self.sec_mgr = sec_mgr
 
     def run_package_playbook(self, devices, packages, state):
+        playbook = [{
+            'hosts': 'targets',
+            'become': True,
+            'tasks': [{
+                'name': f"Ensure packages are {state}",
+                'ansible.builtin.package': {
+                    'name': packages,
+                    'state': state
+                }
+            }]
+        }]
+        return self._execute_playbook(devices, playbook)
+
+    def run_playbook(self, devices, tasks):
+        playbook = [{
+            'hosts': 'targets',
+            'become': True,
+            'tasks': tasks
+        }]
+        return self._execute_playbook(devices, playbook)
+
+    def _execute_playbook(self, devices, playbook):
         temp_dir = tempfile.mkdtemp()
         inventory_path = os.path.join(temp_dir, "inventory.ini")
         playbook_path = os.path.join(temp_dir, "playbook.yml")
@@ -27,18 +49,6 @@ class AnsibleManager:
                     line += f"ansible_ssh_private_key_file='{key_path}'\n"
                 inv_file.write(line)
 
-        playbook = [{
-            'hosts': 'targets',
-            'become': True,
-            'tasks': [{
-                'name': f"Ensure packages are {state}",
-                'ansible.builtin.package': {
-                    'name': packages,
-                    'state': state
-                }
-            }]
-        }]
-        
         with open(playbook_path, "w") as pb_file:
             yaml.dump(playbook, pb_file)
 

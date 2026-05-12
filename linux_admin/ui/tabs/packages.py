@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QLabel, QTextEdit, 
-                             QPushButton, QRadioButton, QButtonGroup, QGroupBox, QLineEdit, QSplitter)
+                             QPushButton, QRadioButton, QButtonGroup, QGroupBox, QLineEdit, QSplitter, QCheckBox)
 from PyQt6.QtCore import Qt
 import base64
 from linux_admin.core.ansible_manager import AnsibleManager
@@ -64,19 +64,18 @@ class PackagesTab(QWidget):
         right_group = QGroupBox("Quick Commands (Selected Target)")
         right_layout = QVBoxLayout(right_group)
         
-        chk_layout = QHBoxLayout()
-        self.chk_input = QLineEdit()
-        self.chk_input.setPlaceholderText("Package name...")
-        self.btn_chk = QPushButton("Check if Installed")
-        self.btn_chk.clicked.connect(self.check_package)
-        chk_layout.addWidget(self.chk_input)
-        chk_layout.addWidget(self.btn_chk)
-        right_layout.addLayout(chk_layout)
+        self.btn_match_db = QPushButton("Match Database to Local Database")
+        self.btn_match_db.clicked.connect(self.match_database)
+        right_layout.addWidget(self.btn_match_db)
         
-        self.btn_update_all = QPushButton("Run Full System Update (apt/yum)")
-        self.btn_update_all.setStyleSheet("background-color: #fab387; color: #11111b; font-weight: bold;")
-        self.btn_update_all.clicked.connect(self.system_update)
-        right_layout.addWidget(self.btn_update_all)
+        self.chk_reboot = QCheckBox("Reboot if required after upgrade")
+        right_layout.addWidget(self.chk_reboot)
+        
+        self.btn_upgrade_system = QPushButton("Upgrade System")
+        self.btn_upgrade_system.setStyleSheet("background-color: #fab387; color: #11111b; font-weight: bold;")
+        self.btn_upgrade_system.clicked.connect(self.upgrade_system)
+        right_layout.addWidget(self.btn_upgrade_system)
+        
         right_layout.addStretch()
         
         splitter.addWidget(right_group)
@@ -121,7 +120,6 @@ class PackagesTab(QWidget):
         self.log(f"\n[Ansible] Starting task for {len(devices)} targets...")
         self.btn_run.setEnabled(False)
         
-        # --- UPDATED THREAD HANDLING ---
         if not hasattr(self, 'active_workers'): self.active_workers = []
         self.active_workers = [w for w in self.active_workers if w.isRunning()]
         
@@ -143,28 +141,59 @@ class PackagesTab(QWidget):
             return None
         return devices[0]
 
-    def check_package(self):
-        dev = self.get_single_device()
-        pkg = self.chk_input.text().strip()
-        if not dev or not pkg: return
-        
-        self.log(f"\nChecking if '{pkg}' is installed on {dev['name']}...")
-        cmd = f"dpkg -s {pkg} 2>/dev/null | grep Status || rpm -q {pkg} || echo 'Not installed or unsupported PM'"
-        self.w1 = SSHWorker(dev, cmd, self.sec_mgr)
-        self.w1.finished.connect(lambda r: self.log(r['stdout'] or r['stderr']))
-        self.w1.start()
-
-    def system_update(self):
+    def match_database(self):
         dev = self.get_single_device()
         if not dev: return
         
-        self.log(f"\nInitiating FULL SYSTEM UPDATE on {dev['name']}...")
-        cmd = "apt-get update && apt-get upgrade -y || yum update -y"
+        self.log(f"\nInitiating DATABASE MATCH on {dev['name']}...")
         
-        # Wrap the compound command in base64 so sudo applies to the whole chain
-        b64_cmd = base64.b64encode(cmd.encode('utf-8')).decode('utf-8')
+        script = """
+        if command -v apt-get &> /dev/null; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+        elif command -v yum &> /dev/null; then
+            yum check-update || true
+        else
+            echo "Unsupported package manager."
+        fi
+        """
+        b64_cmd = base64.b64encode(script.encode('utf-8')).decode('utf-8')
         safe_cmd = f"bash -c 'echo {b64_cmd} | base64 -d | bash'"
         
-        self.w2 = SSHWorker(dev, safe_cmd, self.sec_mgr, use_sudo=True)
-        self.w2.finished.connect(lambda r: self.log("Update Complete:\n" + r['stdout']))
-        self.w2.start()
+        self.w_match = SSHWorker(dev, safe_cmd, self.sec_mgr, use_sudo=True)
+        self.w_match.finished.connect(lambda r: self.log("Database Match Complete:\n" + (r['stdout'] or r['stderr'])))
+        self.w_match.start()
+
+    def upgrade_system(self):
+        dev = self.get_single_device()
+        if not dev: return
+        
+        self.log(f"\nInitiating SYSTEM UPGRADE on {dev['name']}...")
+        
+        script = """
+        if command -v apt-get &> /dev/null; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get upgrade -y
+            if [ "{reboot_flag}" = "True" ] && [ -f /var/run/reboot-required ]; then
+                echo "Reboot required flag found. Rebooting system..."
+                reboot
+            fi
+        elif command -v yum &> /dev/null; then
+            yum upgrade -y
+            if [ "{reboot_flag}" = "True" ] && command -v needs-restarting &> /dev/null; then
+                if ! needs-restarting -r; then
+                    echo "Kernel update applied. Rebooting system..."
+                    reboot
+                fi
+            fi
+        else
+            echo "Unsupported package manager."
+        fi
+        """
+        script = script.replace("{reboot_flag}", str(self.chk_reboot.isChecked()))
+        b64_cmd = base64.b64encode(script.encode('utf-8')).decode('utf-8')
+        safe_cmd = f"bash -c 'echo {b64_cmd} | base64 -d | bash'"
+        
+        self.w_upgrade = SSHWorker(dev, safe_cmd, self.sec_mgr, use_sudo=True)
+        self.w_upgrade.finished.connect(lambda r: self.log("System Upgrade Complete:\n" + (r['stdout'] or r['stderr'])))
+        self.w_upgrade.start()

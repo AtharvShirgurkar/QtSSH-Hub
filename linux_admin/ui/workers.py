@@ -46,3 +46,20 @@ class AnsibleWorker(QThread):
             self.finished.emit(out, err, code)
         except Exception as e:
             self.error.emit(str(e))
+
+class AnsibleGenericWorker(QThread):
+    finished = pyqtSignal(str, str, int)
+    error = pyqtSignal(str)
+
+    def __init__(self, ansible_mgr, devices, tasks):
+        super().__init__()
+        self.ansible_mgr = ansible_mgr
+        self.devices = devices
+        self.tasks = tasks
+
+    def run(self):
+        try:
+            out, err, code = self.ansible_mgr.run_playbook(self.devices, self.tasks)
+            self.finished.emit(out, err, code)
+        except Exception as e:
+            self.error.emit(str(e))
